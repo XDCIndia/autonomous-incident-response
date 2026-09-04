@@ -403,3 +403,65 @@ def test_prepare_toxiproxy_resets_and_ensures_proxies(monkeypatch):
     # When the client is missing entirely the helper reports not-ready.
     monkeypatch.setattr(app_module, "toxiproxy_ctl", None)
     assert asyncio.run(run()) is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #31 — mutating endpoints that drive real Docker/Toxiproxy need an
+# API-key gate (when configured) and a non-wildcard CORS allowlist.
+# ---------------------------------------------------------------------------
+
+
+async def _auth_probe(monkeypatch, api_key_value: str, header: str | None) -> int:
+    """POST a mutating endpoint through the app and return the status.
+
+    Uses an *unknown* scenario on /incidents/trigger: once the auth gate
+    passes, the handler deterministically answers 400 (unknown scenario)
+    with no side effects — independent of whether any earlier in-process
+    test wired docker/toxiproxy globals.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    import backend.api.app as app_module
+    from backend.api.app import app
+    from backend.platform.config import Settings
+
+    # Bypass the module settings cache so each probe uses the wanted api_key.
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(_env_file=None, api_key=api_key_value),  # type: ignore[assignment]
+    )
+
+    headers = {"X-API-Key": header} if header is not None else {}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/incidents/trigger",
+            json={"service_name": "payment-service", "scenario": "does_not_exist"},
+            headers=headers,
+        )
+        return resp.status_code
+
+
+@pytest.mark.asyncio
+async def test_mutating_endpoints_require_api_key_when_configured(monkeypatch):
+    # No header / wrong header -> rejected before the handler runs.
+    assert await _auth_probe(monkeypatch, "sekret", None) == 401
+    assert await _auth_probe(monkeypatch, "sekret", "wrong") == 401
+    # Correct header -> gate passes; handler answers 400 (unknown scenario).
+    assert await _auth_probe(monkeypatch, "sekret", "sekret") == 400
+    # Auth disabled by default (empty key) -> call reaches the handler.
+    assert await _auth_probe(monkeypatch, "", None) == 400
+
+
+def test_cors_allowlist_defaults_to_dashboard_origins():
+    """The CORS allowlist must not be wildcard when real-infra endpoints are
+    callable from a browser (issue #31)."""
+    from backend.api.app import _allowed_origins
+    from backend.platform.config import Settings
+
+    assert "*" not in _allowed_origins
+    assert "http://localhost:3000" in _allowed_origins
+    # Settings default drives the middleware allowlist.
+    defaults = Settings(_env_file=None)
+    assert defaults.cors_origins == "http://localhost:3000,http://127.0.0.1:3000"

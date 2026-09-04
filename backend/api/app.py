@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -249,14 +249,42 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow frontend dev server
+# CORS — restrict to the configured frontend origin(s).  The API drives real
+# Docker/Toxiproxy operations, so a wildcard allowlist would let ANY website
+# open in a browser operate the environment cross-origin (issue #31).
+_allowed_origins = [
+    origin.strip()
+    for origin in get_settings().cors_origins.split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Auth guard for real-infrastructure endpoints (issue #31)
+# ---------------------------------------------------------------------------
+
+
+def require_api_key(request: Request) -> None:
+    """Reject mutating calls that lack a valid API key, when one is configured.
+
+    These endpoints drive real Docker/Toxiproxy state (container replacement,
+    proxy disable, remediation).  When ``API_KEY`` is unset (default) auth is
+    disabled so local dev and the test suite are unaffected; set ``API_KEY``
+    to require the ``X-API-Key`` header on every mutating endpoint.
+    """
+    expected = get_settings().api_key.strip()
+    if not expected:
+        return
+    supplied = request.headers.get("X-API-Key", "")
+    if supplied != expected:
+        raise HTTPException(status_code=401, detail="Missing or invalid API key")
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +340,7 @@ async def services_health(service: str = "payment-service"):
     return status
 
 
-@app.post("/faults/inject")
+@app.post("/faults/inject", dependencies=[Depends(require_api_key)])
 async def inject_fault(request: FaultInjectionRequest):
     """Inject a fault using real Docker operations."""
     if docker_ctl is None:
@@ -383,7 +411,7 @@ async def inject_fault(request: FaultInjectionRequest):
         raise HTTPException(status_code=500, detail=f"Fault injection failed: {e}")
 
 
-@app.post("/remediation/execute")
+@app.post("/remediation/execute", dependencies=[Depends(require_api_key)])
 async def execute_remediation(request: RemediationRequest):
     """Execute a remediation action using real Docker operations."""
     if docker_ctl is None:
@@ -432,7 +460,7 @@ async def execute_remediation(request: RemediationRequest):
     }
 
 
-@app.post("/incidents/trigger", response_model=TriggerResponse)
+@app.post("/incidents/trigger", response_model=TriggerResponse, dependencies=[Depends(require_api_key)])
 async def trigger_incident(request: TriggerRequest):
     """Trigger a new incident with the specified scenario.
 
@@ -572,7 +600,7 @@ async def get_incident(incident_id: str):
     return incident.model_dump(mode="json")
 
 
-@app.post("/incidents/{incident_id}/approve", response_model=ApprovalResponse)
+@app.post("/incidents/{incident_id}/approve", response_model=ApprovalResponse, dependencies=[Depends(require_api_key)])
 async def approve_incident(incident_id: str):
     """Approve remediation for a SEMI_AUTONOMOUS incident."""
     storage = get_storage()
@@ -597,7 +625,7 @@ async def approve_incident(incident_id: str):
     )
 
 
-@app.post("/incidents/{incident_id}/reject", response_model=ApprovalResponse)
+@app.post("/incidents/{incident_id}/reject", response_model=ApprovalResponse, dependencies=[Depends(require_api_key)])
 async def reject_incident(incident_id: str):
     """Reject remediation for a SEMI_AUTONOMOUS incident."""
     storage = get_storage()
