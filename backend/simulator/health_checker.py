@@ -22,6 +22,7 @@ async def verify_service_health(
     service_name: str,
     *,
     health_url: str | None = None,
+    verify_urls: list[str] | None = None,
     retries: int = 15,
     delay: float = 2.0,
 ) -> VerificationResult:
@@ -87,6 +88,24 @@ async def verify_service_health(
         # No URL provided — skip HTTP check, adjust total
         checks_total = 2
         messages.append("HTTP health check skipped (no URL configured)")
+        
+    # --- Check 4: Extra verify URLs (e.g. /pay) ---
+    if verify_urls and is_running:
+        checks_total += len(verify_urls)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for v_url in verify_urls:
+                try:
+                    resp = await client.get(v_url)
+                    if resp.status_code == 200:
+                        checks_passed += 1
+                        messages.append(f"Verify {v_url}: 200 OK")
+                        recovered_metrics[f"verify_{v_url}"] = resp.status_code
+                    else:
+                        messages.append(f"Verify {v_url}: {resp.status_code}")
+                        recovered_metrics[f"verify_{v_url}"] = resp.status_code
+                except Exception as exc:
+                    messages.append(f"Verify {v_url} failed: {exc}")
+                    recovered_metrics[f"verify_error_{v_url}"] = str(exc)
 
     verified = checks_passed == checks_total
 

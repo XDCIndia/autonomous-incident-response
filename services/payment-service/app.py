@@ -12,6 +12,9 @@ Bad mode (FORCE_UNHEALTHY=true):
 import os
 import random
 import time
+import urllib.request
+import urllib.error
+import json
 
 from flask import Flask, jsonify
 
@@ -19,6 +22,7 @@ app = Flask(__name__)
 
 VERSION = os.environ.get("SERVICE_VERSION", "v2.4.0")
 FORCE_UNHEALTHY = os.environ.get("FORCE_UNHEALTHY", "false").lower() == "true"
+RPC_URL = os.environ.get("RPC_URL", None)
 
 
 @app.route("/health")
@@ -44,12 +48,39 @@ def pay():
         }), 500
 
     # Healthy response with normal latency
-    latency = random.uniform(30, 80)
-    time.sleep(latency / 1000)
+    start_time = time.time()
+    
+    # RPC Integration
+    rpc_data = None
+    if RPC_URL:
+        try:
+            # Short timeout to simulate dependency failure if toxic is injected
+            req = urllib.request.Request(RPC_URL)
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                if response.status == 200:
+                    rpc_data = json.loads(response.read().decode())
+                else:
+                    return jsonify({"error": "rpc_failed", "status_code": response.status}), 502
+        except urllib.error.URLError as e:
+            # If the proxy is disabled (circuit break), connection is refused immediately
+            if isinstance(e.reason, ConnectionRefusedError):
+                # Successful circuit break fallback
+                rpc_data = {"status": "ok", "provider": "fallback_cache"}
+            else:
+                # Timeout / outage
+                return jsonify({"error": "rpc_timeout_or_unreachable", "details": str(e)}), 504
+        except Exception as e:
+            return jsonify({"error": "rpc_error", "details": str(e)}), 500
+    else:
+        # Default mock latency if no RPC_URL
+        time.sleep(random.uniform(0.03, 0.08))
+
+    latency_ms = (time.time() - start_time) * 1000
     return jsonify({
         "result": "ok",
         "version": VERSION,
-        "latency_ms": round(latency, 1),
+        "latency_ms": round(latency_ms, 1),
+        "rpc_data": rpc_data
     }), 200
 
 
@@ -64,4 +95,4 @@ def root():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)

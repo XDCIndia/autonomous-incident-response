@@ -22,6 +22,7 @@ from backend.contracts import RemediationRequest, RemediationResult, SeverityLev
 
 if TYPE_CHECKING:
     from backend.simulator.docker_controller import DockerController
+    from backend.simulator.toxiproxy_client import ToxiproxyClient
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,9 @@ class RemediationEngine:
     in-memory state mutation for backward compatibility.
     """
 
-    def __init__(self, docker_controller: DockerController | None = None):
+    def __init__(self, docker_controller: DockerController | None = None, toxiproxy_client: ToxiproxyClient | None = None):
         self._docker = docker_controller
+        self._toxiproxy = toxiproxy_client
         self._simulated_state: dict[str, Any] = {
             "current_version": "v2.4.1",
             "db_connections_used": 100,
@@ -98,6 +100,14 @@ class RemediationEngine:
         # ── Real Docker restart ─────────────────────────────────────────
         if action == "restart_service" and self._docker is not None:
             return await self._real_restart(request)
+
+        # ── Real Toxiproxy Circuit Break ────────────────────────────────
+        if action == "circuit_break" and self._toxiproxy is not None:
+            return await self._real_circuit_break(request)
+
+        # ── Real Toxiproxy Switch to Secondary ──────────────────────────
+        if action == "switch_to_secondary" and self._toxiproxy is not None:
+            return await self._real_switch_to_secondary(request)
 
         # ── Mock fallback for all other actions ─────────────────────────
         return await self._mock_execute(request)
@@ -236,6 +246,71 @@ class RemediationEngine:
             action="restart_service",
             success=success,
             message=f"Restarted {service}" if success else f"Failed to restart {service}",
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_circuit_break(self, request: RemediationRequest) -> RemediationResult:
+        """Disable the toxiproxy to trigger the fallback logic."""
+        service = request.target_service
+        # In our scenario, proxy name is payment-rpc-proxy
+        # The parameters dict might contain proxy_name, fallback to default
+        proxy_name = request.parameters.get("proxy_name", "payment-rpc-proxy")
+        
+        before_state = {"proxy": proxy_name, "enabled": True}
+        
+        # Disable proxy
+        updated = self._toxiproxy.update_proxy(proxy_name, enabled=False)
+        
+        if updated:
+            success = True
+            message = f"Circuit breaker OPENED via Toxiproxy (proxy {proxy_name} disabled)"
+            after_state = {"proxy": proxy_name, "enabled": False}
+        else:
+            success = False
+            message = f"Failed to open circuit breaker on Toxiproxy for {proxy_name}"
+            after_state = before_state
+
+        return RemediationResult(
+            action="circuit_break",
+            success=success,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_switch_to_secondary(self, request: RemediationRequest) -> RemediationResult:
+        """Switch the toxiproxy upstream to the secondary RPC."""
+        service = request.target_service
+        proxy_name = request.parameters.get("proxy_name", "payment-rpc-proxy")
+        secondary_upstream = request.parameters.get("secondary_upstream", "rpc-service-secondary:5000")
+        
+        proxy_info = self._toxiproxy.get_proxy(proxy_name)
+        before_upstream = proxy_info.get("upstream") if proxy_info else "unknown"
+        before_state = {"proxy": proxy_name, "upstream": before_upstream}
+        
+        # Remove any toxic (like timeout) before switching if we want to ensure recovery
+        # (Though switching alone might bypass the toxic if toxics are stream specific, but Toxiproxy toxics are proxy-wide)
+        # Actually, let's remove the toxic if we know it
+        toxic_name = request.parameters.get("toxic_name", "outage_timeout")
+        self._toxiproxy.remove_toxic(proxy_name, toxic_name)
+
+        # Switch upstream
+        updated = self._toxiproxy.update_proxy(proxy_name, upstream=secondary_upstream)
+        
+        if updated:
+            success = True
+            message = f"Switched proxy {proxy_name} upstream to {secondary_upstream}"
+            after_state = {"proxy": proxy_name, "upstream": secondary_upstream}
+        else:
+            success = False
+            message = f"Failed to switch proxy upstream for {proxy_name}"
+            after_state = before_state
+
+        return RemediationResult(
+            action="switch_to_secondary",
+            success=success,
+            message=message,
             before_state=before_state,
             after_state=after_state,
         )

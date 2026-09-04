@@ -52,6 +52,7 @@ services:
       - SERVICE_VERSION=v2.4.0
       - FORCE_UNHEALTHY=false
       - PORT=5000
+      - RPC_URL=http://toxiproxy:8080/process
     labels:
       iras.service: "payment-service"
       iras.version: "v2.4.0"
@@ -64,3 +65,47 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
+
+  rpc-service-primary:
+    build:
+      context: ./services/rpc-service
+      dockerfile: Dockerfile
+    container_name: iras-rpc-service-primary
+    ports:
+      - "5002:5000"
+    environment:
+      - PROVIDER=primary
+      - PORT=5000
+    labels:
+      iras.service: "rpc-service"
+      iras.managed: "true"
+    networks:
+      - iras-net
+      
+  rpc-service-secondary:
+    build:
+      context: ./services/rpc-service
+      dockerfile: Dockerfile
+    container_name: iras-rpc-service-secondary
+    ports:
+      - "5003:5000"
+    environment:
+      - PROVIDER=secondary
+      - PORT=5000
+    labels:
+      iras.service: "rpc-service-secondary"
+      iras.managed: "true"
+    networks:
+      - iras-net
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: toxiproxy
+    ports:
+      - "8474:8474" # Toxiproxy API
+      - "8080:8080" # payment-rpc-proxy
+    networks:
+      - iras-net
+    labels:
+      iras.service: "toxiproxy"
+      iras.managed: "true"

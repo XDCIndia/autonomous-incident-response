@@ -27,6 +27,7 @@ from backend.contracts import TelemetryEvent
 
 if TYPE_CHECKING:
     from backend.simulator.docker_controller import ContainerConfig, DockerController
+    from backend.simulator.toxiproxy_client import ToxiproxyClient
 
 logger = logging.getLogger(__name__)
 
@@ -213,15 +214,41 @@ def inject_database_failure(
 
 def inject_dependency_outage(
     service: str = "payment-service",
-    dependency: str = "external-gateway",
-) -> list[TelemetryEvent]:
+    dependency: str = "rpc-service-primary",
+    toxiproxy_client: ToxiproxyClient | None = None,
+) -> FaultInjectionResult:
     """Simulate upstream dependency outage — external gateway stops responding.
 
     The log investigator may initially blame payment-service,
     but the metric investigator should correlate with gateway timeouts.
     """
     now = datetime.now(timezone.utc)
-    return [
+    
+    docker_performed = False
+    metadata = {}
+    
+    if toxiproxy_client:
+        proxy_name = "payment-rpc-proxy"
+        # Inject timeout toxic
+        toxic = toxiproxy_client.add_toxic(
+            proxy_name=proxy_name,
+            toxic_name="outage_timeout",
+            toxic_type="timeout",
+            attributes={"timeout": 30000}
+        )
+        if toxic:
+            docker_performed = True
+            metadata = {
+                "proxy_name": proxy_name,
+                "dependency": dependency,
+                "toxic_name": "outage_timeout",
+                "toxic_type": "timeout",
+                "previous_upstream": "rpc-service-primary:5000",
+                "secondary_upstream": "rpc-service-secondary:5000"
+            }
+            logger.info("Injected dependency outage on %s", proxy_name)
+    
+    signals = [
         TelemetryEvent(
             timestamp=now,
             source=service,
@@ -230,6 +257,7 @@ def inject_dependency_outage(
             metadata={
                 "log_message": f"Timeout calling {dependency} from {service}",
                 "root_cause_hint": "dependency_outage",
+                **metadata
             },
         ),
         TelemetryEvent(
@@ -253,6 +281,12 @@ def inject_dependency_outage(
             },
         ),
     ]
+    
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        service=service,
+    )
 
 
 def inject_resource_exhaustion(

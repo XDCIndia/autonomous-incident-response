@@ -27,6 +27,7 @@ from backend.platform.events import get_event_bus
 from backend.platform.knowledge_base import search_similar
 from backend.platform.storage import get_storage
 from backend.simulator.docker_controller import DockerController
+from backend.simulator.toxiproxy_client import ToxiproxyClient
 from backend.simulator.health_checker import verify_service_health
 from backend.remediation.actions import RemediationEngine
 
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Global State
 # ---------------------------------------------------------------------------
 docker_ctl: Optional[DockerController] = None
+toxiproxy_ctl: Optional[ToxiproxyClient] = None
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -54,6 +56,18 @@ async def lifespan(app: FastAPI):
         docker_ctl = DockerController()
     except Exception as e:
         logger.warning("Could not initialize DockerController: %s", e)
+        
+    try:
+        toxiproxy_ctl = ToxiproxyClient()
+        toxiproxy_ctl.reset()
+        # Pre-create the proxy for the dependency outage scenario
+        toxiproxy_ctl.create_proxy(
+            name="payment-rpc-proxy",
+            listen="0.0.0.0:8080",
+            upstream="rpc-service-primary:5000"
+        )
+    except Exception as e:
+        logger.warning("Could not initialize ToxiproxyClient: %s", e)
         
     yield
     await storage.close()
@@ -136,7 +150,7 @@ async def inject_fault(request: FaultInjectionRequest):
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
         
-    from backend.simulator import inject_bad_deployment
+    from backend.simulator import inject_bad_deployment, inject_dependency_outage
     
     if request.scenario == "bad_deployment":
         result = inject_bad_deployment(
@@ -153,6 +167,20 @@ async def inject_fault(request: FaultInjectionRequest):
                 "bad_version": result.bad_version
             }
         }
+    elif request.scenario == "dependency_outage":
+        if toxiproxy_ctl is None:
+            raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+        result = inject_dependency_outage(
+            service=request.service_name,
+            toxiproxy_client=toxiproxy_ctl,
+            **request.parameters
+        )
+        return {
+            "status": "success",
+            "message": f"Injected {request.scenario} on {request.service_name}",
+            "docker_performed": result.docker_performed,
+            "metadata": result.metadata
+        }
     else:
         raise HTTPException(status_code=400, detail=f"Scenario {request.scenario} not implemented for direct injection")
 
@@ -163,7 +191,10 @@ async def execute_remediation(request: RemediationRequest):
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
         
-    engine = RemediationEngine(docker_controller=docker_ctl)
+    engine = RemediationEngine(
+        docker_controller=docker_ctl, 
+        toxiproxy_client=toxiproxy_ctl
+    )
     result = await engine.execute(request)
     
     # Also run verification if successful
@@ -175,14 +206,17 @@ async def execute_remediation(request: RemediationRequest):
             port = "5001"
         health_url = f"http://backend:{port}/health" if "payment-service" not in request.target_service else "http://payment-service:5000/health"
         
-        # Local direct docker-compose DNS works better
-        # For our MVP payment-service is on iras-net, so backend can reach it at payment-service:5000
         health_url = f"http://{request.target_service}:5000/health"
+        
+        verify_urls = []
+        if request.target_service == "payment-service" and request.action in ("circuit_break", "switch_to_secondary"):
+            verify_urls.append(f"http://{request.target_service}:5000/pay")
         
         verification = await verify_service_health(
             docker_ctl, 
             request.target_service,
-            health_url=health_url
+            health_url=health_url,
+            verify_urls=verify_urls
         )
     
     return {
