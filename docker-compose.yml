@@ -29,11 +29,25 @@ services:
     depends_on:
       payment-service:
         condition: service_healthy
-      # Start ordering only: the toxiproxy image is scratch-based (no
-      # curl/wget for a healthcheck), so readiness — including creating the
-      # rpc/db proxies — is guaranteed by the backend's bounded startup
-      # retry loop instead (see ToxiproxyClient.ensure_default_proxies).
+      # These four don't define a healthcheck block, so Compose only
+      # supports waiting for "started" on them (condition: service_healthy
+      # is a validation error without one) — still enough to fix the actual
+      # bug: on a cold `docker-compose up`, the backend's lifespan pre-creates
+      # Toxiproxy proxies pointing at rpc-service-primary/db-service before
+      # any of these three containers exist yet, which fails silently (only
+      # a logger.warning) and leaves those proxies missing until a restart.
+      # For toxiproxy specifically, this is start-ordering only: the image is
+      # scratch-based (no curl/wget for a healthcheck), so actual readiness —
+      # including creating the rpc/db proxies — is guaranteed by the
+      # backend's bounded startup retry loop instead (see
+      # ToxiproxyClient.ensure_default_proxies).
       toxiproxy:
+        condition: service_started
+      db-service:
+        condition: service_started
+      rpc-service-primary:
+        condition: service_started
+      rpc-service-secondary:
         condition: service_started
 
   frontend:

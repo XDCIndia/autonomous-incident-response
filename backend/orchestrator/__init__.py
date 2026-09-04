@@ -6,7 +6,7 @@ The orchestrator coordinates the full flow:
 It depends ONLY on shared contracts and injected interfaces.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from backend.orchestrator.pipeline import IncidentOrchestrator
 from backend.orchestrator.nodes import VerificationInterface
@@ -14,15 +14,24 @@ from backend.platform.events import EventBus
 from backend.platform.storage import Storage
 from backend.remediation.actions import RemediationEngine
 
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import DockerController
+
 # Module-level singleton for API integration
 _orchestrator: IncidentOrchestrator | None = None
 
 
-def get_orchestrator() -> IncidentOrchestrator:
-    """Get or create the singleton orchestrator instance."""
+def get_orchestrator(docker_ctl: Optional["DockerController"] = None) -> IncidentOrchestrator:
+    """Get or create the singleton orchestrator instance.
+
+    `docker_ctl`, when given, is only used the first time the singleton is
+    constructed (so the verification stage can perform real health checks
+    instead of its no-Docker stub) — it has no effect on later calls once the
+    singleton already exists.
+    """
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = IncidentOrchestrator()
+        _orchestrator = IncidentOrchestrator(docker_ctl=docker_ctl)
     return _orchestrator
 
 

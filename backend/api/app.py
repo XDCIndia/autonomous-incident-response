@@ -192,6 +192,12 @@ async def lifespan(app: FastAPI):
         docker_ctl = None
         logger.warning("Could not initialize DockerController: %s", e)
 
+    # Construct the orchestrator singleton now (rather than lazily on the
+    # first request) so its verification stage picks up the real
+    # DockerController — a lazy get_orchestrator() call from a later request
+    # would only ever see it as None, permanently falling back to the stub.
+    get_orchestrator(docker_ctl=docker_ctl)
+
     # Toxiproxy readiness: the standard proxies must exist before scenario
     # endpoints are used.  On the first `docker compose up` the Toxiproxy
     # image may still be pulling while the backend boots, so retry for a
@@ -318,7 +324,12 @@ async def inject_fault(request: FaultInjectionRequest):
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
 
-    from backend.simulator.scenarios import inject_bad_deployment, inject_dependency_outage, inject_database_failure
+    from backend.simulator.scenarios import (
+        inject_bad_deployment,
+        inject_dependency_outage,
+        inject_database_failure,
+        inject_resource_exhaustion,
+    )
 
     try:
         if request.scenario == "bad_deployment":
@@ -330,6 +341,18 @@ async def inject_fault(request: FaultInjectionRequest):
             metadata = {
                 "previous_config": result.previous_config,
                 "bad_version": result.bad_version,
+            }
+        elif request.scenario == "resource_exhaustion":
+            result = await inject_resource_exhaustion(
+                service=request.service_name,
+                docker_controller=docker_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
             }
         elif request.scenario == "dependency_outage":
             if toxiproxy_ctl is None:
@@ -456,6 +479,12 @@ async def trigger_incident(request: TriggerRequest):
     # actually injected into the running Docker/Toxiproxy services.  When the
     # real environment is NOT available the whole pipeline stays in mock mode
     # (mock signals + mock remediation) so the two never mix.
+    #
+    # resource_exhaustion is deliberately excluded from this wiring — its
+    # injection stays mock-signal-only here even when the real environment is
+    # available (real CPU-exhaustion injection exists for /faults/inject, see
+    # backend/simulator/scenarios.py's docker_controller param, but wiring it
+    # into the autonomous trigger flow too is a separate follow-up).
     use_real_env = await _ensure_real_orchestrator()
 
     # Every incident must start from a clean environment: a previous
@@ -468,9 +497,10 @@ async def trigger_incident(request: TriggerRequest):
     # Inject the fault into the real environment (when available) and collect
     # the telemetry that the investigators will reason about.
     #
-    # Note: inject_bad_deployment is async (async DockerController);
-    # database/dependency use a sync ToxiproxyClient (run via to_thread) and
-    # degrade to mock signals when no controller is passed.
+    # Note: inject_bad_deployment and inject_resource_exhaustion are async
+    # (async DockerController); database/dependency use a sync ToxiproxyClient
+    # (run via to_thread) and degrade to mock signals when no controller is
+    # passed.
     if request.scenario == "bad_deployment":
         result = await inject_bad_deployment(
             service=request.service_name,
@@ -489,7 +519,7 @@ async def trigger_incident(request: TriggerRequest):
             toxiproxy_client=toxiproxy_ctl if use_real_env else None,
         )
     elif request.scenario == "resource_exhaustion":
-        result = inject_resource_exhaustion(service=request.service_name)
+        result = await inject_resource_exhaustion(service=request.service_name)
     else:
         raise HTTPException(
             status_code=400,

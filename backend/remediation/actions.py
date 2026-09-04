@@ -6,6 +6,10 @@ No arbitrary shell commands. No arbitrary code execution.
 Real Docker remediation:
     When a ``DockerController`` is available, ``rollback_deploy`` performs
     actual container replacement using the saved container configuration.
+    ``scale_up`` lifts the CPU quota constraint ``inject_resource_
+    exhaustion`` applies (see backend/simulator/scenarios.py) — this stack
+    has no load balancer, so running additional replicas wouldn't receive
+    any traffic; relieving the actual constraint is what's meaningful here.
 
 Mock mode (no controller):
     Falls back to the original in-memory state mutation.
@@ -115,6 +119,10 @@ class RemediationEngine:
         # ── Real Reset Connection Pool ──────────────────────────────────
         if action == "reset_connection_pool" and self._docker is not None and self._toxiproxy is not None:
             return await self._real_reset_connection_pool(request)
+
+        # ── Real Scale Up (lift the CPU quota constraint) ───────────────
+        if action == "scale_up" and self._docker is not None:
+            return await self._real_scale_up(request)
 
         # ── Mock fallback for all other actions ─────────────────────────
         return await self._mock_execute(request)
@@ -354,6 +362,48 @@ class RemediationEngine:
             action="reset_connection_pool",
             success=success,
             message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_scale_up(self, request: RemediationRequest) -> RemediationResult:
+        """Relieve real CPU exhaustion by lifting the container's CPU quota
+        constraint back to unlimited.
+
+        This docker-compose stack has no load balancer in front of any
+        service, so spinning up additional replicas of the same image (the
+        other reading of "scale up") wouldn't receive any traffic — nothing
+        routes to them. Lifting the CPU quota cap that
+        ``inject_resource_exhaustion`` (backend/simulator/scenarios.py)
+        applies is the remediation that's actually meaningful against how
+        that scenario injects its fault.
+        """
+        service = request.target_service
+
+        before_health = await self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+        }
+
+        success = await self._docker.restore_resources(service)
+        if success:
+            await self._docker.wait_for_health(service, retries=10, delay=2.0)
+
+        after_health = await self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+        }
+
+        return RemediationResult(
+            action="scale_up",
+            success=success,
+            message=(
+                f"Lifted CPU quota constraint on {service}"
+                if success
+                else f"Failed to lift CPU constraint on {service}"
+            ),
             before_state=before_state,
             after_state=after_state,
         )
