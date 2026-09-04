@@ -20,6 +20,25 @@ const SCENARIOS = [
   { id: "resource_exhaustion", label: "🔵 Resource Exhaustion", service: "order-service" },
 ];
 
+// Static service list — mirrors backend/simulator/service_graph.py's default topology.
+const KNOWN_SERVICES = ["gateway", "order-service", "payment-service", "shipping-service", "inventory-service"];
+
+const UNRESOLVED_STATES = new Set(["created", "detected", "investigating", "analyzing", "severity_determined", "remediating", "verifying"]);
+
+function computeServiceHealth(incidents: IncidentSummary[]): Record<string, "healthy" | "degraded" | "down"> {
+  const health: Record<string, "healthy" | "degraded" | "down"> = {};
+  for (const svc of KNOWN_SERVICES) health[svc] = "healthy";
+  for (const inc of incidents) {
+    if (!KNOWN_SERVICES.includes(inc.service_name)) continue;
+    if (inc.state === "escalated" || inc.state === "failed") {
+      health[inc.service_name] = "down";
+    } else if (UNRESOLVED_STATES.has(inc.state) && health[inc.service_name] !== "down") {
+      health[inc.service_name] = "degraded";
+    }
+  }
+  return health;
+}
+
 export default function Dashboard() {
   const [incidents, setIncidents] = useState<IncidentSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -66,8 +85,39 @@ export default function Dashboard() {
     }
   };
 
+  const health = computeServiceHealth(incidents);
+  const healthColors: Record<string, { bg: string; border: string; dot: string }> = {
+    healthy: { bg: "#e8f5e9", border: "#a5d6a7", dot: "🟢" },
+    degraded: { bg: "#fff3cd", border: "#ffe69c", dot: "🟡" },
+    down: { bg: "#f8d7da", border: "#f1aeb5", dot: "🔴" },
+  };
+
   return (
     <div>
+      <h2>Service Health</h2>
+      <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", marginBottom: "32px" }}>
+        {KNOWN_SERVICES.map((svc) => {
+          const status = health[svc];
+          const c = healthColors[status];
+          return (
+            <div
+              key={svc}
+              style={{
+                padding: "10px 16px",
+                borderRadius: "8px",
+                background: c.bg,
+                border: `1px solid ${c.border}`,
+                fontSize: "13px",
+                minWidth: "140px",
+              }}
+            >
+              <div>{c.dot} {svc}</div>
+              <small style={{ color: "#666", textTransform: "capitalize" }}>{status}</small>
+            </div>
+          );
+        })}
+      </div>
+
       <h2>Trigger Incident</h2>
       <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", marginBottom: "32px" }}>
         {SCENARIOS.map((s) => (

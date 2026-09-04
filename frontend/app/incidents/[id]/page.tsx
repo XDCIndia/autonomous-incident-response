@@ -20,8 +20,25 @@ interface Incident {
   service_name: string;
   state: string;
   severity: string | null;
+  autonomy_level: string | null;
   current_stage: string | null;
   created_at: string;
+  severity_result: {
+    blast_radius: number;
+    affected_services: string[];
+    justification: string;
+  } | null;
+  remediation_request: {
+    action: string;
+    description: string;
+    target_service: string;
+    requires_approval: boolean;
+  } | null;
+  remediation_result: {
+    action: string;
+    success: boolean;
+    message: string;
+  } | null;
   report: {
     root_cause: string;
     impact: string;
@@ -32,6 +49,17 @@ interface Incident {
   } | null;
 }
 
+// Static service topology — mirrors backend/simulator/service_graph.py's
+// get_default_graph(). Not exposed via API (Role 3's module), so kept as a
+// frontend-side constant purely for blast-radius layout purposes.
+const SERVICE_TOPOLOGY: { name: string; dependsOn: string[] }[] = [
+  { name: "gateway", dependsOn: [] },
+  { name: "order-service", dependsOn: ["gateway"] },
+  { name: "payment-service", dependsOn: ["order-service"] },
+  { name: "shipping-service", dependsOn: ["order-service"] },
+  { name: "inventory-service", dependsOn: ["payment-service"] },
+];
+
 export default function IncidentPage() {
   const params = useParams();
   const id = params.id as string;
@@ -39,14 +67,30 @@ export default function IncidentPage() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [connected, setConnected] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState(false);
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Fetch incident details
-  useEffect(() => {
+  const refreshIncident = () => {
     fetch(`${API_URL}/incidents/${id}`)
       .then((res) => res.json())
       .then(setIncident)
       .catch(console.error);
+  };
+
+  const refreshApproval = () => {
+    fetch(`${API_URL}/incidents/${id}/approval`)
+      .then((res) => res.json())
+      .then((data) => setPendingApproval(Boolean(data.has_pending_approval)))
+      .catch(console.error);
+  };
+
+  // Fetch incident details
+  useEffect(() => {
+    refreshIncident();
+    refreshApproval();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   // WebSocket for live timeline
@@ -69,11 +113,9 @@ export default function IncidentPage() {
         return [...prev, data];
       });
 
-      // Refresh incident details on new events
-      fetch(`${API_URL}/incidents/${id}`)
-        .then((res) => res.json())
-        .then(setIncident)
-        .catch(console.error);
+      // Refresh incident details + approval status on new events
+      refreshIncident();
+      refreshApproval();
     };
 
     ws.onclose = () => {
@@ -82,7 +124,29 @@ export default function IncidentPage() {
     };
 
     return () => ws.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  const submitApproval = async (approved: boolean) => {
+    setApprovalSubmitting(true);
+    setApprovalError(null);
+    try {
+      const res = await fetch(`${API_URL}/incidents/${id}/${approved ? "approve" : "reject"}`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setApprovalError(err.detail || "Failed to submit decision");
+        return;
+      }
+      refreshApproval();
+      refreshIncident();
+    } catch (e) {
+      setApprovalError("Failed to connect to backend");
+    } finally {
+      setApprovalSubmitting(false);
+    }
+  };
 
   if (!incident) {
     return <p>Loading incident...</p>;
@@ -93,6 +157,97 @@ export default function IncidentPage() {
       <a href="/" style={{ color: "#0066cc", marginBottom: "16px", display: "inline-block" }}>
         ← Back to Dashboard
       </a>
+
+      {pendingApproval && (
+        <div style={{
+          padding: "16px",
+          marginBottom: "24px",
+          background: "#fff3cd",
+          border: "1px solid #ffe69c",
+          borderRadius: "8px",
+        }}>
+          <h3 style={{ margin: "0 0 8px" }}>🟡 Approval Required</h3>
+          <p style={{ margin: "0 0 12px" }}>
+            Remediation <strong>{incident.remediation_request?.action ?? "—"}</strong> on{" "}
+            <strong>{incident.remediation_request?.target_service ?? incident.service_name}</strong> needs
+            human approval before it executes ({incident.severity} — semi-autonomous tier).
+          </p>
+          {incident.remediation_request?.description && (
+            <p style={{ margin: "0 0 12px", color: "#555", fontSize: "13px" }}>
+              {incident.remediation_request.description}
+            </p>
+          )}
+          <div style={{ display: "flex", gap: "12px" }}>
+            <button
+              onClick={() => submitApproval(true)}
+              disabled={approvalSubmitting}
+              style={{
+                padding: "8px 20px",
+                border: "1px solid #2e7d32",
+                borderRadius: "6px",
+                background: "#2e7d32",
+                color: "#fff",
+                cursor: approvalSubmitting ? "not-allowed" : "pointer",
+              }}
+            >
+              Approve
+            </button>
+            <button
+              onClick={() => submitApproval(false)}
+              disabled={approvalSubmitting}
+              style={{
+                padding: "8px 20px",
+                border: "1px solid #c62828",
+                borderRadius: "6px",
+                background: "#fff",
+                color: "#c62828",
+                cursor: approvalSubmitting ? "not-allowed" : "pointer",
+              }}
+            >
+              Reject
+            </button>
+          </div>
+          {approvalError && (
+            <p style={{ marginTop: "8px", color: "#c62828", fontSize: "13px" }}>{approvalError}</p>
+          )}
+        </div>
+      )}
+
+      {incident.severity_result && (
+        <div style={{ padding: "16px", marginBottom: "24px", border: "1px solid #eee", borderRadius: "8px" }}>
+          <h3 style={{ margin: "0 0 4px" }}>Blast Radius</h3>
+          <p style={{ margin: "0 0 12px", color: "#666", fontSize: "13px" }}>
+            {incident.severity_result.justification}
+          </p>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center" }}>
+            {SERVICE_TOPOLOGY.map((svc, i) => {
+              const isPrimary = svc.name === incident.service_name;
+              const isAffected = incident.severity_result!.affected_services.includes(svc.name);
+              const bg = isPrimary ? "#f8d7da" : isAffected ? "#ffe5b4" : "#f0f0f0";
+              const border = isPrimary ? "#dc3545" : isAffected ? "#fd7e14" : "#ddd";
+              return (
+                <span key={svc.name} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span
+                    title={svc.dependsOn.length ? `depends on: ${svc.dependsOn.join(", ")}` : "entry point"}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "6px",
+                      background: bg,
+                      border: `1px solid ${border}`,
+                      fontSize: "13px",
+                      fontWeight: isPrimary || isAffected ? 600 : 400,
+                    }}
+                  >
+                    {isPrimary ? "🔴 " : isAffected ? "🟠 " : ""}
+                    {svc.name}
+                  </span>
+                  {i < SERVICE_TOPOLOGY.length - 1 && <span style={{ color: "#bbb" }}>→</span>}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", marginBottom: "32px" }}>
         <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
