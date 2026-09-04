@@ -185,7 +185,14 @@ class TestTargetMonitorDetection:
         assert len(orchestrator.run_calls) == 1
 
     @pytest.mark.asyncio
-    async def test_new_incident_created_after_previous_one_reaches_terminal_state(self, storage, monkeypatch):
+    async def test_terminal_incident_does_not_rearm_while_still_unhealthy(self, storage, monkeypatch):
+        """Reaching a terminal state must NOT re-arm incident creation on
+        its own — url_monitor incidents can resolve to terminal in well
+        under a second (recommendation-only remediation, single HTTP
+        verification), so gating purely on active_incident_id would create
+        a new incident on almost every tick for the duration of one real
+        outage. Only a genuine recovery (a successful check) re-arms.
+        Regression test for the sustained-outage incident flood."""
         monkeypatch.setattr(
             url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(500))
         )
@@ -198,11 +205,58 @@ class TestTargetMonitorDetection:
         await monitor.check_once()
         assert len(orchestrator.run_calls) == 1
 
-        # Simulate the (real, async) pipeline finishing in the background.
+        # Simulate the (real, async) pipeline finishing in the background —
+        # terminal, but the URL is still genuinely down.
         await orchestrator.resolve_last(IncidentState.ESCALATED)
 
-        # Next check clears active_incident_id (terminal) and starts a fresh
-        # failure count; two more failures cross the threshold again.
+        # Many more failed ticks while the outage continues — still exactly
+        # one incident, not one per tick.
+        for _ in range(10):
+            await monitor.check_once()
+        assert len(orchestrator.run_calls) == 1
+
+        updated = await target_store.get_target(storage, target.id)
+        assert updated.incident_reported is True
+        assert updated.active_incident_id is None  # terminal incident cleared, but not re-armed
+        assert updated.consecutive_failures >= 2
+
+    @pytest.mark.asyncio
+    async def test_new_incident_created_only_after_genuine_recovery_then_new_outage(self, storage, monkeypatch):
+        """A SECOND incident is only possible after the target genuinely
+        recovers (a successful check resets incident_reported) and then
+        fails again — not merely because the first incident went
+        terminal."""
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=2)
+
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(500))
+        )
+        await monitor.check_once()
+        await monitor.check_once()
+        assert len(orchestrator.run_calls) == 1
+        await orchestrator.resolve_last(IncidentState.ESCALATED)
+
+        # Still down for a few more ticks — no second incident yet.
+        await monitor.check_once()
+        await monitor.check_once()
+        assert len(orchestrator.run_calls) == 1
+
+        # Genuine recovery.
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(200))
+        )
+        await monitor.check_once()
+        updated = await target_store.get_target(storage, target.id)
+        assert updated.incident_reported is False
+        assert updated.health_status == "healthy"
+        assert updated.consecutive_failures == 0
+
+        # A brand new outage.
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(500))
+        )
         await monitor.check_once()
         await monitor.check_once()
         assert len(orchestrator.run_calls) == 2

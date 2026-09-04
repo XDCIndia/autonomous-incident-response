@@ -75,6 +75,51 @@ def collect_remediation_parameters(incident: Incident) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# url_monitor verification safety boundary
+# ---------------------------------------------------------------------------
+#
+# A module-level function, not a method on any particular verifier class, so
+# the OrchestratorNodes.verify() node can call it directly and guarantee a
+# source="url_monitor" incident NEVER reaches a Docker/container-based
+# verifier — regardless of which VerificationInterface implementation is
+# currently configured (stub, real ServiceHealthVerifier, or any future one).
+# See OrchestratorNodes.verify() below, which branches on incident.source
+# BEFORE touching self.verification at all.
+
+async def verify_via_url(target_url: str) -> VerificationResult:
+    """Verify a url_monitor-sourced incident against the REAL target URL
+    directly — there's no docker container/host-port for an arbitrary
+    external application, so this is a plain HTTP re-check, never a
+    container-based multi-layer check.
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            resp = await client.get(target_url)
+        verified = resp.status_code < 500
+        return VerificationResult(
+            verified=verified,
+            checks_passed=1 if verified else 0,
+            checks_total=1,
+            message=(
+                f"{target_url} responded {resp.status_code}"
+                if verified
+                else f"{target_url} still returning {resp.status_code}"
+            ),
+            recovered_metrics={"status_code": resp.status_code},
+        )
+    except Exception as e:
+        return VerificationResult(
+            verified=False,
+            checks_passed=0,
+            checks_total=1,
+            message=f"{target_url} still unreachable: {e}",
+            recovered_metrics={},
+        )
+
+
+# ---------------------------------------------------------------------------
 # Verification interface
 # ---------------------------------------------------------------------------
 
@@ -151,36 +196,11 @@ class VerificationInterface:
         )
 
     async def _verify_via_url(self, target_url: str) -> VerificationResult:
-        """Verify a url_monitor-sourced incident against the REAL target
-        URL directly — there's no docker container/host-port for an
-        arbitrary external application, so this is a plain HTTP re-check,
-        not the container-based multi-layer check above.
-        """
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-                resp = await client.get(target_url)
-            verified = resp.status_code < 500
-            return VerificationResult(
-                verified=verified,
-                checks_passed=1 if verified else 0,
-                checks_total=1,
-                message=(
-                    f"{target_url} responded {resp.status_code}"
-                    if verified
-                    else f"{target_url} still returning {resp.status_code}"
-                ),
-                recovered_metrics={"status_code": resp.status_code},
-            )
-        except Exception as e:
-            return VerificationResult(
-                verified=False,
-                checks_passed=0,
-                checks_total=1,
-                message=f"{target_url} still unreachable: {e}",
-                recovered_metrics={},
-            )
+        """Delegates to the module-level verify_via_url — kept as a thin
+        wrapper so any code still calling VerificationInterface directly
+        (e.g. existing tests) gets identical behavior to the node-level
+        enforcement in OrchestratorNodes.verify()."""
+        return await verify_via_url(target_url)
 
     def _stub_verify(self, incident: Incident) -> VerificationResult:
         success = incident.remediation_result.success if incident.remediation_result else False
@@ -620,7 +640,17 @@ class OrchestratorNodes:
     # -------------------------------------------------------------------
 
     async def verify(self, state: OrchestratorState) -> dict:
-        """Stage 7: Verify that remediation was effective."""
+        """Stage 7: Verify that remediation was effective.
+
+        Safety boundary: a source="url_monitor" incident is ALWAYS verified
+        by a direct HTTP check against incident.target_url, decided here
+        before self.verification is touched at all — never delegated to
+        whichever verifier implementation happens to be configured (stub, or
+        the real Docker-backed ServiceHealthVerifier wired in when
+        real_env=auto detects Docker). That verifier has no concept of an
+        arbitrary external URL and would otherwise look up a nonexistent
+        container by service name (see issue: verification bypass).
+        """
         incident: Incident = state["incident"]
 
         await self._emit(
@@ -630,7 +660,10 @@ class OrchestratorNodes:
             "Verifying remediation effectiveness",
         )
 
-        verification_result = await self.verification.verify(incident)
+        if incident.source == "url_monitor" and incident.target_url:
+            verification_result = await verify_via_url(incident.target_url)
+        else:
+            verification_result = await self.verification.verify(incident)
         incident.verification_result = verification_result
 
         passed = "PASSED" if verification_result.verified else "FAILED"

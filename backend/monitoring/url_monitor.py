@@ -150,14 +150,18 @@ class TargetMonitor:
             await self._check_target(target)
 
     async def _check_target(self, target: MonitoredTarget) -> None:
+        # Keep active_incident_id accurate (informational — "the incident
+        # currently tracking this target's state, if any") but this no
+        # longer gates whether we poll or whether a new incident can be
+        # created — see incident_reported below. url_monitor incidents can
+        # reach a terminal state in well under a second (recommendation-only
+        # remediation, single HTTP verification), so a still-ongoing real
+        # outage must not re-arm incident creation just because the previous
+        # incident already finished its pipeline run.
         if target.active_incident_id:
             incident = await self._storage.get_incident(target.active_incident_id)
             if incident is None or incident.state in _TERMINAL_STATES:
                 target.active_incident_id = None
-            else:
-                # Already investigating this target — don't pile on more
-                # incidents while one is in flight.
-                return
 
         result = await check_url_health(target.url, timeout=self._check_timeout)
         target.last_checked_at = datetime.now(timezone.utc)
@@ -168,21 +172,25 @@ class TargetMonitor:
         if result["success"]:
             target.consecutive_failures = 0
             target.health_status = "healthy"
+            # Genuine recovery — re-arm. A future new failure streak is a
+            # new outage and may create a new incident.
+            target.incident_reported = False
         else:
             target.consecutive_failures += 1
             target.health_status = "unhealthy"
 
-        if target.consecutive_failures >= self._failure_threshold and not target.active_incident_id:
-            incident = self._build_incident(target, result)
-            target.active_incident_id = incident.id
-            logger.warning(
-                "MonitoredTarget %s (%s) failed %d consecutive checks — creating incident %s",
-                target.name,
-                target.url,
-                target.consecutive_failures,
-                incident.id,
-            )
-            asyncio.create_task(self._run_incident(incident))
+            if target.consecutive_failures >= self._failure_threshold and not target.incident_reported:
+                incident = self._build_incident(target, result)
+                target.active_incident_id = incident.id
+                target.incident_reported = True
+                logger.warning(
+                    "MonitoredTarget %s (%s) failed %d consecutive checks — creating incident %s",
+                    target.name,
+                    target.url,
+                    target.consecutive_failures,
+                    incident.id,
+                )
+                asyncio.create_task(self._run_incident(incident))
 
         await target_store.save_target(self._storage, target)
 

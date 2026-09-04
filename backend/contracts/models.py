@@ -275,5 +275,15 @@ class MonitoredTarget(BaseModel):
     last_latency_ms: Optional[float] = None
     last_error: Optional[str] = None
     active_incident_id: Optional[str] = None
+    # True from the moment an incident is created for the CURRENT outage
+    # until the URL genuinely recovers (a successful health check) —
+    # independent of whether that incident has since reached a terminal
+    # state. This is what prevents re-arming mid-outage: url_monitor
+    # incidents can resolve to a terminal state in well under a second
+    # (recommendation-only remediation, single HTTP verification), so gating
+    # incident creation on active_incident_id alone would create a new
+    # incident on almost every monitor tick for the duration of one real
+    # outage. Only a genuine recovery clears this flag.
+    incident_reported: bool = False
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
