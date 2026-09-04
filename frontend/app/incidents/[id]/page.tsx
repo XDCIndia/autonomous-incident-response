@@ -1,172 +1,95 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
+import { LiveIncident } from "@/components/LiveIncident";
+import { PostMortem } from "@/components/PostMortem";
+import { canonicalReport, findIncident } from "@/lib/incidents";
+import type { PostMortemReport } from "@/lib/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+type View = "loading" | "live" | "report";
 
-interface TimelineEvent {
-  id: string;
-  timestamp: string;
-  stage: string;
-  status: string;
-  message: string;
-  metadata: Record<string, unknown>;
-}
-
-interface Incident {
-  id: string;
-  service_name: string;
-  state: string;
-  severity: string | null;
-  current_stage: string | null;
-  created_at: string;
-  report: {
-    root_cause: string;
-    impact: string;
-    remediation_action: string;
-    confidence: number;
-    prevention: string;
-    result_metrics: Record<string, { before: unknown; after: unknown }>;
-  } | null;
-}
-
+/**
+ * Incident deep-dive.
+ *  - /incidents/live            → the live command center (simulation entry point)
+ *  - /incidents/<real id>       → stored post-mortem report, or the canonical demo report
+ */
 export default function IncidentPage() {
   const params = useParams();
-  const id = params.id as string;
+  const id = (params.id as string) ?? "";
+  const [view, setView] = useState<View>("loading");
+  const [report, setReport] = useState<PostMortemReport | null>(null);
+  const [fallback, setFallback] = useState(false);
 
-  const [incident, setIncident] = useState<Incident | null>(null);
-  const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
-  const [connected, setConnected] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
-
-  // Fetch incident details
   useEffect(() => {
-    fetch(`${API_URL}/incidents/${id}`)
-      .then((res) => res.json())
-      .then(setIncident)
-      .catch(console.error);
+    if (id === "live") {
+      setView("live");
+      return;
+    }
+    const found = findIncident(id);
+    if (found) {
+      setReport(found);
+      setFallback(false);
+      setView("report");
+    } else {
+      setReport(canonicalReport());
+      setFallback(true);
+      setView("report");
+    }
   }, [id]);
 
-  // WebSocket for live timeline
-  useEffect(() => {
-    const ws = new WebSocket(`${WS_URL}/ws/incidents/${id}`);
-    wsRef.current = ws;
+  if (view === "live") {
+    return <LiveIncident />;
+  }
 
-    ws.onopen = () => {
-      setConnected(true);
-      console.log("WebSocket connected");
-    };
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "ping") return; // keepalive
-
-      setTimeline((prev) => {
-        // Avoid duplicates
-        if (prev.some((e) => e.id === data.id)) return prev;
-        return [...prev, data];
-      });
-
-      // Refresh incident details on new events
-      fetch(`${API_URL}/incidents/${id}`)
-        .then((res) => res.json())
-        .then(setIncident)
-        .catch(console.error);
-    };
-
-    ws.onclose = () => {
-      setConnected(false);
-      console.log("WebSocket disconnected");
-    };
-
-    return () => ws.close();
-  }, [id]);
-
-  if (!incident) {
-    return <p>Loading incident...</p>;
+  if (view === "loading" || !report) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-[var(--color-bg-base)]">
+        <div className="text-center space-y-4">
+          <div className="mx-auto h-8 w-8 rounded-full border-2 border-[var(--color-border-default)] border-t-[var(--color-accent-cyan)] animate-spin" />
+          <p className="font-mono text-[11px] tracking-[0.14em] text-[var(--color-text-muted)]">
+            loading incident report
+          </p>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div>
-      <a href="/" style={{ color: "#0066cc", marginBottom: "16px", display: "inline-block" }}>
-        ← Back to Dashboard
-      </a>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", marginBottom: "32px" }}>
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>Incident Details</h3>
-          <dl style={{ margin: 0 }}>
-            <dt style={{ fontWeight: "bold" }}>ID</dt>
-            <dd>{incident.id}</dd>
-            <dt style={{ fontWeight: "bold" }}>Service</dt>
-            <dd>{incident.service_name}</dd>
-            <dt style={{ fontWeight: "bold" }}>State</dt>
-            <dd>
-              <span style={{
-                padding: "2px 8px",
-                borderRadius: "4px",
-                background: incident.state === "resolved" ? "#d4edda" : incident.state === "failed" ? "#f8d7da" : "#fff3cd",
-              }}>
-                {incident.state}
-              </span>
-            </dd>
-            <dt style={{ fontWeight: "bold" }}>Severity</dt>
-            <dd>{incident.severity || "—"}</dd>
-            <dt style={{ fontWeight: "bold" }}>Stage</dt>
-            <dd>{incident.current_stage || "—"}</dd>
-          </dl>
-        </div>
-
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>
-            Live Timeline
-            <span style={{ fontSize: "12px", color: connected ? "green" : "red", marginLeft: "8px" }}>
-              {connected ? "● Connected" : "○ Disconnected"}
-            </span>
-          </h3>
-          <div style={{ maxHeight: "300px", overflowY: "auto" }}>
-            {timeline.length === 0 ? (
-              <p style={{ color: "#666" }}>Waiting for events...</p>
-            ) : (
-              timeline.map((event) => (
-                <div key={event.id} style={{
-                  padding: "8px",
-                  marginBottom: "4px",
-                  background: event.status === "failed" ? "#fee" : event.status === "started" ? "#fff3cd" : "#f0f0f0",
-                  borderRadius: "4px",
-                  fontSize: "13px",
-                }}>
-                  <strong>{event.stage}</strong> — {event.message}
-                  <br />
-                  <small style={{ color: "#666" }}>
-                    {new Date(event.timestamp).toLocaleTimeString()} · {event.status}
-                  </small>
-                </div>
-              ))
-            )}
+    <div className="min-h-screen">
+      {/* slim brand bar */}
+      <header className="sticky top-0 z-40 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]/85 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5">
+          <Link
+            href="/"
+            className="label-micro shrink-0 text-[var(--color-text-muted)] transition-colors duration-200 hover:text-[var(--color-text-primary)]"
+          >
+            ← OVERVIEW
+          </Link>
+          <div className="mx-1 hidden h-5 w-px bg-[var(--color-border-subtle)] sm:block" />
+          <div className="relative grid h-8 w-8 shrink-0 place-items-center">
+            <div className="absolute inset-0 rounded-full border border-[rgba(54,215,232,0.2)]" />
+            <div className="absolute inset-[3px] rounded-full border border-dashed border-[rgba(255,77,103,0.25)]" />
+            <div className="h-2.5 w-2.5 rounded-full bg-[var(--color-accent-red)] opacity-80" />
           </div>
+          <div className="leading-tight">
+            <span className="text-[14px] font-semibold tracking-[0.1em] text-[var(--color-text-primary)]">SYSTEM BACHAO</span>
+            <span className="label-micro ml-3 text-[var(--color-text-faint)]">post-incident report</span>
+          </div>
+          <span className="ml-auto font-mono text-[11px] tracking-[0.1em] text-[var(--color-text-muted)]">{report.id}</span>
         </div>
-      </div>
+      </header>
 
-      {incident.report && (
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>Incident Report</h3>
-          <dl style={{ margin: 0 }}>
-            <dt style={{ fontWeight: "bold" }}>Root Cause</dt>
-            <dd>{incident.report.root_cause}</dd>
-            <dt style={{ fontWeight: "bold" }}>Impact</dt>
-            <dd>{incident.report.impact}</dd>
-            <dt style={{ fontWeight: "bold" }}>Remediation</dt>
-            <dd>{incident.report.remediation_action}</dd>
-            <dt style={{ fontWeight: "bold" }}>Confidence</dt>
-            <dd>{(incident.report.confidence * 100).toFixed(0)}%</dd>
-            <dt style={{ fontWeight: "bold" }}>Prevention</dt>
-            <dd>{incident.report.prevention}</dd>
-          </dl>
+      {fallback && (
+        <div className="border-b border-[rgba(245,184,75,0.15)] bg-[rgba(245,184,75,0.03)]">
+          <p className="mx-auto max-w-[1280px] px-4 py-2 font-mono text-[10px] tracking-[0.06em] text-[var(--color-accent-amber)] opacity-80">
+            incident {id} was not simulated this session — showing the canonical demo incident {report.id}
+          </p>
         </div>
       )}
+
+      <PostMortem report={report} />
     </div>
   );
 }

@@ -1,8 +1,22 @@
 import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+import { ThemeProvider } from "@/lib/theme-context";
+
+const geistSans = Geist({
+  subsets: ["latin"],
+  variable: "--font-geist-sans",
+});
+
+const geistMono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-geist-mono",
+});
 
 export const metadata: Metadata = {
-  title: "Autonomous Incident Response",
-  description: "Enterprise incident response dashboard",
+  title: "System Bachao — Your System. Protected by AI.",
+  description:
+    "Autonomous enterprise incident response. A self-healing AI core that detects, investigates and remediates service failures in real time.",
 };
 
 export default function RootLayout({
@@ -11,14 +25,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body style={{ margin: 0, fontFamily: "system-ui, sans-serif" }}>
-        <header style={{ padding: "16px 24px", borderBottom: "1px solid #eee", background: "#f8f9fa" }}>
-          <h1 style={{ margin: 0, fontSize: "20px" }}>
-            🚨 Autonomous Incident Response
-          </h1>
-        </header>
-        <main style={{ padding: "24px" }}>{children}</main>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} theme-dark`}>
+      <body>
+        <ThemeProvider>
+          <div className="cine-bg" aria-hidden />
+          <div className="cine-grid" aria-hidden />
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );
