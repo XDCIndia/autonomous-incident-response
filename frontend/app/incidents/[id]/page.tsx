@@ -113,7 +113,12 @@ export default function IncidentPage() {
     try {
       const data = await getIncident(id);
       setIncident(data);
-      setTimeline(data.timeline);
+      // Defensive de-dupe: the backend replays this same list to every new
+      // WebSocket connection, and in dev, React's Strict Mode briefly opens
+      // two connections per mount — dedupe by id so a stray duplicate never
+      // reaches state (see the WS handler's own stale-socket guard below).
+      const seen = new Set<string>();
+      setTimeline(data.timeline.filter((e) => (seen.has(e.id) ? false : seen.add(e.id))));
       incidentStateRef.current = data.state;
       setFetchError(null);
     } catch (e) {
@@ -166,6 +171,11 @@ export default function IncidentPage() {
 
       ws.onmessage = (event) => {
         if (!mountedRef.current) return;
+        // Ignore messages from a socket that's no longer the active one —
+        // guards against a stale connection (e.g. React Strict Mode's
+        // double-mount in dev) still delivering its own replay of the
+        // incident's existing timeline after a newer socket has taken over.
+        if (wsRef.current !== ws) return;
         let data: TimelineEvent | { type: string };
         try {
           data = JSON.parse(event.data);
