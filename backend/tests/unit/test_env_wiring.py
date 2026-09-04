@@ -358,3 +358,69 @@ def test_toxiproxy_reset_reports_success_and_failure():
 
     client.client = _FakeSyncClientFail()  # type: ignore[assignment]
     assert client.reset() is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #17 — proxies must be (re)created, not assumed to exist from a single
+# best-effort startup call.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_default_proxies_creates_all_standard_proxies():
+    from backend.simulator.toxiproxy_client import ToxiproxyClient
+
+    class _RecordingClient(ToxiproxyClient):
+        def __init__(self):
+            self.created: list[str] = []
+            self.fail_next = False
+
+        def create_proxy(self, name, listen, upstream, enabled=True):
+            self.created.append(name)
+            return None if self.fail_next else {"name": name, "enabled": True}
+
+    client = _RecordingClient()
+    assert client.ensure_default_proxies() is True
+    # Both proxies in the standard topology are ensured.
+    assert client.created == ["payment-rpc-proxy", "payment-db-proxy"]
+
+    # Idempotent on repeat calls (no duplicate creation requests).
+    client.created = []
+    assert client.ensure_default_proxies() is True
+    assert client.created == ["payment-rpc-proxy", "payment-db-proxy"]
+
+    # Reports failure when a proxy cannot be created (Toxiproxy down).
+    client.fail_next = True
+    assert client.ensure_default_proxies() is False
+
+
+def test_prepare_toxiproxy_resets_and_ensures_proxies(monkeypatch):
+    """The pre-injection helper must both reset toxics AND recreate missing
+    proxies, so an injection never targets a proxy that does not exist."""
+    import backend.api.app as app_module
+
+    class _Toxiproxy:
+        def __init__(self):
+            self.reset_calls = 0
+            self.ensure_calls = 0
+
+        def reset(self):
+            self.reset_calls += 1
+            return True
+
+        def ensure_default_proxies(self):
+            self.ensure_calls += 1
+            return True
+
+    fake = _Toxiproxy()
+    monkeypatch.setattr(app_module, "toxiproxy_ctl", fake)
+
+    async def run():
+        return await app_module._prepare_toxiproxy()
+
+    assert asyncio.run(run()) is True
+    assert fake.reset_calls == 1
+    assert fake.ensure_calls == 1
+
+    # When the client is missing entirely the helper reports not-ready.
+    monkeypatch.setattr(app_module, "toxiproxy_ctl", None)
+    assert asyncio.run(run()) is False

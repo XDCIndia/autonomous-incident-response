@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional, Any
 
@@ -65,6 +66,9 @@ async def _real_env_available() -> bool:
             return False
         if toxiproxy_ctl is None:
             return False
+        # Best-effort self-heal: recreate the standard proxies if Toxiproxy
+        # came up late or restarted after the backend booted (issue #17).
+        await asyncio.to_thread(toxiproxy_ctl.ensure_default_proxies)
         rpc_proxy = await asyncio.to_thread(toxiproxy_ctl.get_proxy, "payment-rpc-proxy")
         db_proxy = await asyncio.to_thread(toxiproxy_ctl.get_proxy, "payment-db-proxy")
         return rpc_proxy is not None and db_proxy is not None
@@ -123,10 +127,30 @@ async def _ensure_real_orchestrator() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Per-incident environment reset (issue #16)
+# Per-incident environment reset (issue #16) + bootstrap (issue #17)
 # ---------------------------------------------------------------------------
 
 _TOXIPROXY_SCENARIOS = ("database_failure", "dependency_outage")
+
+# Bounded startup wait for Toxiproxy (issue #17): the proxies must exist
+# before scenario endpoints are used, but a purely-local mock/dev backend
+# (no stack) must still be able to boot.
+TOXIPROXY_STARTUP_GRACE_SECONDS = 40.0
+
+
+async def _prepare_toxiproxy() -> bool:
+    """Restore a clean Toxiproxy baseline and ensure the standard proxies exist.
+
+    Used at startup (with retry), during real-environment detection, and
+    before each toxiproxy fault injection so the proxy topology is never
+    silently missing (issue #17).  Returns True only when both the reset and
+    the proxy ensure succeeded.
+    """
+    if toxiproxy_ctl is None:
+        return False
+    reset_ok = await asyncio.to_thread(toxiproxy_ctl.reset)
+    proxies_ok = await asyncio.to_thread(toxiproxy_ctl.ensure_default_proxies)
+    return reset_ok and proxies_ok
 
 
 async def _reset_toxiproxy_before_injection(scenario: str) -> None:
@@ -140,11 +164,10 @@ async def _reset_toxiproxy_before_injection(scenario: str) -> None:
     """
     if scenario not in _TOXIPROXY_SCENARIOS or toxiproxy_ctl is None:
         return
-    ok = await asyncio.to_thread(toxiproxy_ctl.reset)
-    if not ok:
+    if not await _prepare_toxiproxy():
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to reset Toxiproxy before {scenario} injection",
+            detail=f"Failed to prepare Toxiproxy before {scenario} injection",
         )
 
 
@@ -161,9 +184,12 @@ async def lifespan(app: FastAPI):
     await storage.init_db()
     logger.info("Application started — env=%s", settings.app_env)
     
+    mode = settings.real_env.strip().lower()
+
     try:
         docker_ctl = await asyncio.to_thread(DockerController)
     except Exception as e:
+        docker_ctl = None
         logger.warning("Could not initialize DockerController: %s", e)
 
     # Construct the orchestrator singleton now (rather than lazily on the
@@ -172,26 +198,43 @@ async def lifespan(app: FastAPI):
     # would only ever see it as None, permanently falling back to the stub.
     get_orchestrator(docker_ctl=docker_ctl)
 
-
+    # Toxiproxy readiness: the standard proxies must exist before scenario
+    # endpoints are used.  On the first `docker compose up` the Toxiproxy
+    # image may still be pulling while the backend boots, so retry for a
+    # bounded window (issue #17) instead of silently running without proxies
+    # for the lifetime of the process.  In REAL_ENV=off (mock/dev) a single
+    # best-effort attempt is made so startup is never delayed without infra.
+    toxiproxy_ready = False
     try:
         toxiproxy_ctl = await asyncio.to_thread(ToxiproxyClient)
-        await asyncio.to_thread(toxiproxy_ctl.reset)
-        # Pre-create the proxy for the dependency outage scenario
-        await asyncio.to_thread(
-            toxiproxy_ctl.create_proxy,
-            name="payment-rpc-proxy",
-            listen="0.0.0.0:8080",
-            upstream="rpc-service-primary:5000",
-        )
-        # Pre-create the proxy for the database failure scenario
-        await asyncio.to_thread(
-            toxiproxy_ctl.create_proxy,
-            name="payment-db-proxy",
-            listen="0.0.0.0:8081",
-            upstream="db-service:5000",
-        )
+        if mode == "off":
+            toxiproxy_ready = await _prepare_toxiproxy()
+        else:
+            deadline = time.monotonic() + TOXIPROXY_STARTUP_GRACE_SECONDS
+            while time.monotonic() < deadline:
+                if await _prepare_toxiproxy():
+                    toxiproxy_ready = True
+                    break
+                logger.warning("Toxiproxy not ready yet — retrying...")
+                await asyncio.sleep(2.0)
+            if not toxiproxy_ready:
+                logger.error(
+                    "Toxiproxy never became ready within %.0fs — toxiproxy "
+                    "scenarios will not apply real faults until it is reachable",
+                    TOXIPROXY_STARTUP_GRACE_SECONDS,
+                )
     except Exception as e:
         logger.warning("Could not initialize ToxiproxyClient: %s", e)
+
+    # REAL_ENV=on is an explicit demand for the real environment: fail loudly
+    # at startup instead of booting into a silently-fabricating mock mode.
+    if mode == "on" and (docker_ctl is None or not toxiproxy_ready):
+        raise RuntimeError(
+            "REAL_ENV=on but the real environment is unavailable "
+            f"(docker={'ok' if docker_ctl is not None else 'missing'}, "
+            f"toxiproxy={'ok' if toxiproxy_ready else 'unreachable'}). "
+            "Start the docker-compose stack, or set REAL_ENV=auto/off."
+        )
 
     # Wire the pipeline to the real environment if the IRAS service stack is
     # already up (compose starts payment-service before the backend).

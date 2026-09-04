@@ -21,6 +21,7 @@ import pytest
 import httpx
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+TOXIPROXY_API = os.environ.get("TOXIPROXY_API", "http://localhost:8474")
 # payment-service host-mapped port (repo E2E convention: services in
 # compose, backend/tests on the host).
 PAY_URL = os.environ.get("PAY_URL", "http://localhost:5001/pay")
@@ -90,3 +91,48 @@ async def test_repeated_dependency_outage_runs_apply_real_fault_each_time():
 
         for run in (1, 2):
             await _run_dependency_outage_cycle(client, run)
+
+
+@pytest.mark.asyncio
+async def test_missing_proxy_is_recreated_before_injection():
+    """Issue #17: an injection must recreate a missing RPC proxy instead of
+    silently no-op'ing.
+
+    Simulates a backend that booted before Toxiproxy was reachable (or a
+    Toxiproxy restart that dropped its proxies): the proxy is deleted, then a
+    dependency_outage injection must recreate it and genuinely degrade the
+    service.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        health = await client.get(f"{API_URL}/services/health?service=payment-service")
+        if health.status_code != 200 or not health.json().get("running"):
+            pytest.skip("payment-service container not running — skipping test")
+
+        # Remove the RPC proxy entirely.
+        deleted = await client.delete(f"{TOXIPROXY_API}/proxies/payment-rpc-proxy")
+        assert deleted.status_code in (200, 204), f"could not delete proxy: {deleted.text}"
+        assert (
+            await client.get(f"{TOXIPROXY_API}/proxies/payment-rpc-proxy")
+        ).status_code == 404, "proxy still present after delete"
+
+        # Inject — the pre-injection prepare must recreate the proxy first.
+        inject = await client.post(
+            f"{API_URL}/faults/inject",
+            json={
+                "scenario": "dependency_outage",
+                "service_name": "payment-service",
+                "parameters": {},
+            },
+        )
+        assert inject.status_code == 200, f"inject failed: {inject.text}"
+        data = inject.json()
+        assert data["docker_performed"] is True, f"no real fault applied: {data}"
+        assert data["metadata"]["proxy_name"] == "payment-rpc-proxy"
+
+        # The proxy exists again and the fault genuinely degraded the service.
+        proxy = await client.get(f"{TOXIPROXY_API}/proxies/payment-rpc-proxy")
+        assert proxy.status_code == 200, "proxy was not recreated"
+        assert proxy.json().get("enabled") is True
+
+        degraded = await client.get(PAY_URL)
+        assert degraded.status_code != 200, "service not degraded after recreated injection"

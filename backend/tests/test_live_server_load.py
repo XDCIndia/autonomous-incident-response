@@ -66,11 +66,14 @@ def live_server(tmp_path_factory):
     )
 
     base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 15
+    # Poll generous: some CI/dev boxes add ~1-2s of latency to every new TCP
+    # connection (observed on Windows), so a 1s timeout can spuriously miss a
+    # server that is merely slow to answer, not down.
+    deadline = time.time() + 25
     last_error = None
     while time.time() < deadline:
         try:
-            resp = httpx.get(f"{base_url}/health", timeout=1.0)
+            resp = httpx.get(f"{base_url}/health", timeout=5.0)
             if resp.status_code == 200:
                 break
         except Exception as e:

@@ -7,6 +7,23 @@ logger = logging.getLogger(__name__)
 class ToxiproxyClient:
     """Client for communicating with the Toxiproxy REST API."""
 
+    # Standard IRAS proxy topology.  payment-service reaches its RPC
+    # dependency through ``payment-rpc-proxy`` (listen 8080) and its database
+    # through ``payment-db-proxy`` (listen 8081); both are expected to exist
+    # before scenario endpoints are used.
+    DEFAULT_PROXIES = (
+        {
+            "name": "payment-rpc-proxy",
+            "listen": "0.0.0.0:8080",
+            "upstream": "rpc-service-primary:5000",
+        },
+        {
+            "name": "payment-db-proxy",
+            "listen": "0.0.0.0:8081",
+            "upstream": "db-service:5000",
+        },
+    )
+
     def __init__(self, api_url: str | None = None):
         import os
         self.api_url = (api_url or os.environ.get("TOXIPROXY_URL", "http://localhost:8474")).rstrip("/")
@@ -58,6 +75,29 @@ class ToxiproxyClient:
         except Exception as e:
             logger.error("Failed to get proxy %s: %s", name, e)
             return None
+
+    def ensure_default_proxies(self) -> bool:
+        """Create the standard IRAS proxies if they do not exist yet.
+
+        Idempotent: ``create_proxy`` treats Toxiproxy's duplicate-conflict
+        (HTTP 409) as success and returns the existing proxy.  Used at
+        startup (with retry) and lazily before each toxiproxy injection, so
+        a backend that boots before Toxiproxy — or survives a Toxiproxy
+        restart — never silently loses the proxy topology (issue #17).
+
+        Returns True when all standard proxies exist afterwards.
+        """
+        all_ok = True
+        for spec in self.DEFAULT_PROXIES:
+            proxy = self.create_proxy(
+                name=spec["name"],
+                listen=spec["listen"],
+                upstream=spec["upstream"],
+            )
+            if proxy is None:
+                logger.error("Proxy %s is missing after ensure_default_proxies", spec["name"])
+                all_ok = False
+        return all_ok
 
     def update_proxy(self, name: str, enabled: Optional[bool] = None, upstream: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Update an existing proxy (e.g. enable/disable, change upstream)."""

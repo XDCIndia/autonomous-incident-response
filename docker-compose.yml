@@ -36,6 +36,11 @@ services:
       # Toxiproxy proxies pointing at rpc-service-primary/db-service before
       # any of these three containers exist yet, which fails silently (only
       # a logger.warning) and leaves those proxies missing until a restart.
+      # For toxiproxy specifically, this is start-ordering only: the image is
+      # scratch-based (no curl/wget for a healthcheck), so actual readiness —
+      # including creating the rpc/db proxies — is guaranteed by the
+      # backend's bounded startup retry loop instead (see
+      # ToxiproxyClient.ensure_default_proxies).
       toxiproxy:
         condition: service_started
       db-service:
