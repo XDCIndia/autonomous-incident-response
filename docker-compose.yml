@@ -1,5 +1,9 @@
 version: "3.8"
 
+networks:
+  iras-net:
+    driver: bridge
+
 services:
   backend:
     build:
@@ -11,7 +15,14 @@ services:
       - .env
     volumes:
       - ./backend:/app/backend
+      # Docker socket mount — allows the backend to manage containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - iras-net
     command: uvicorn backend.api.app:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      payment-service:
+        condition: service_healthy
 
   frontend:
     build:
@@ -25,3 +36,31 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    networks:
+      - iras-net
+
+  # ── Mock Web3 Services ────────────────────────────────────────────
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: iras-payment-service
+    ports:
+      - "5001:5000"
+    environment:
+      - SERVICE_VERSION=v2.4.0
+      - FORCE_UNHEALTHY=false
+      - PORT=5000
+    labels:
+      iras.service: "payment-service"
+      iras.version: "v2.4.0"
+      iras.managed: "true"
+    networks:
+      - iras-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 3

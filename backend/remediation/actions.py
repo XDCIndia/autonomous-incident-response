@@ -3,17 +3,25 @@
 Safety invariant: LLM can ONLY select from this action set.
 No arbitrary shell commands. No arbitrary code execution.
 
-Person 3 implements real remediation logic here.
-For the foundation, actions modify mock simulator state.
+Real Docker remediation:
+    When a ``DockerController`` is available, ``rollback_deploy`` performs
+    actual container replacement using the saved container configuration.
+
+Mock mode (no controller):
+    Falls back to the original in-memory state mutation.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend.contracts import RemediationRequest, RemediationResult, SeverityLevel
+
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import DockerController
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +58,13 @@ SEVERITY_AUTONOMY_MAP: dict[SeverityLevel, bool] = {
 class RemediationEngine:
     """Executes remediation actions from the fixed allowed set.
 
-    Mock implementation: modifies internal state to simulate remediation.
+    When ``docker_controller`` is provided, actions that support real
+    Docker operations will use it.  Otherwise, falls back to mock
+    in-memory state mutation for backward compatibility.
     """
 
-    def __init__(self):
+    def __init__(self, docker_controller: DockerController | None = None):
+        self._docker = docker_controller
         self._simulated_state: dict[str, Any] = {
             "current_version": "v2.4.1",
             "db_connections_used": 100,
@@ -74,9 +85,167 @@ class RemediationEngine:
     async def execute(self, request: RemediationRequest) -> RemediationResult:
         """Execute a remediation action.
 
-        This is a MOCK implementation. Actions modify simulated state.
-        Person 3 implements real execution here.
+        Dispatches to real Docker operations when a controller is
+        available and the action supports it.  Falls back to mock
+        state mutation otherwise.
         """
+        action = request.action
+
+        # ── Real Docker rollback ────────────────────────────────────────
+        if action == "rollback_deploy" and self._docker is not None:
+            return await self._real_rollback(request)
+
+        # ── Real Docker restart ─────────────────────────────────────────
+        if action == "restart_service" and self._docker is not None:
+            return await self._real_restart(request)
+
+        # ── Mock fallback for all other actions ─────────────────────────
+        return await self._mock_execute(request)
+
+    # -----------------------------------------------------------------
+    # Real Docker operations
+    # -----------------------------------------------------------------
+
+    async def _real_rollback(self, request: RemediationRequest) -> RemediationResult:
+        """Rollback a bad deployment using real Docker operations.
+
+        Expects ``request.parameters`` to contain ``previous_config`` —
+        the full container configuration saved during fault injection.
+        """
+        from backend.simulator.docker_controller import ContainerConfig
+
+        service = request.target_service
+        params = request.parameters
+
+        # Capture before-state
+        before_health = self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+            "version": before_health.get("version", "unknown"),
+            "image": before_health.get("image", "unknown"),
+        }
+
+        # Extract the saved configuration
+        prev_config_dict = params.get("previous_config")
+        if not prev_config_dict:
+            return RemediationResult(
+                action="rollback_deploy",
+                success=False,
+                message=f"No previous_config provided for {service} — cannot rollback",
+                before_state=before_state,
+                after_state=before_state,
+            )
+
+        try:
+            # Reconstruct the ContainerConfig from the serialized dict
+            prev_config = ContainerConfig(**prev_config_dict)
+        except Exception as exc:
+            return RemediationResult(
+                action="rollback_deploy",
+                success=False,
+                message=f"Invalid previous_config: {exc}",
+                before_state=before_state,
+                after_state=before_state,
+            )
+
+        # Step 1: Remove the bad container
+        logger.info("Rollback: removing bad deployment for %s", service)
+        self._docker.remove_container(service, force=True)
+
+        # Step 2: Deploy the previous known-good version
+        logger.info(
+            "Rollback: restoring %s to image=%s version=%s",
+            service, prev_config.image, prev_config.version,
+        )
+        # Remove FORCE_UNHEALTHY from the restored environment
+        restored_env_overrides = {
+            "FORCE_UNHEALTHY": "false",
+            "SERVICE_VERSION": prev_config.version,
+        }
+        container = self._docker.deploy_version(
+            prev_config,
+            env_overrides=restored_env_overrides,
+        )
+
+        if container is None:
+            return RemediationResult(
+                action="rollback_deploy",
+                success=False,
+                message=f"Failed to start previous version for {service}",
+                before_state=before_state,
+                after_state=before_state,
+            )
+
+        # Step 3: Wait for the restored container to become healthy
+        logger.info("Rollback: waiting for %s to become healthy", service)
+        became_healthy = self._docker.wait_for_health(service, retries=15, delay=2.0)
+
+        after_health = self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+            "version": after_health.get("version", "unknown"),
+            "image": after_health.get("image", "unknown"),
+        }
+
+        if became_healthy:
+            message = (
+                f"Rolled back {service}: "
+                f"{before_state['version']} → {prev_config.version} — healthy"
+            )
+        else:
+            message = (
+                f"Rolled back {service}: "
+                f"{before_state['version']} → {prev_config.version} — "
+                f"health status: {after_health.get('health', 'unknown')}"
+            )
+
+        logger.info("Rollback result: success=%s message=%s", became_healthy, message)
+
+        return RemediationResult(
+            action="rollback_deploy",
+            success=became_healthy,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_restart(self, request: RemediationRequest) -> RemediationResult:
+        """Restart a service container using real Docker operations."""
+        service = request.target_service
+        before_health = self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+            "version": before_health.get("version", "unknown"),
+        }
+
+        success = self._docker.restart_container(service)
+        if success:
+            self._docker.wait_for_health(service, retries=10, delay=2.0)
+
+        after_health = self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+            "version": after_health.get("version", "unknown"),
+        }
+
+        return RemediationResult(
+            action="restart_service",
+            success=success,
+            message=f"Restarted {service}" if success else f"Failed to restart {service}",
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    # -----------------------------------------------------------------
+    # Mock fallback (original behavior, preserved)
+    # -----------------------------------------------------------------
+
+    async def _mock_execute(self, request: RemediationRequest) -> RemediationResult:
+        """Original mock implementation — modifies simulated state."""
         before_state = dict(self._simulated_state)
         action = request.action
         success = True
@@ -113,7 +282,7 @@ class RemediationEngine:
             message = f"Unknown action: {action}"
 
         after_state = dict(self._simulated_state)
-        logger.info("RemediationEngine: action=%s success=%s message=%s", action, success, message)
+        logger.info("RemediationEngine(mock): action=%s success=%s message=%s", action, success, message)
 
         return RemediationResult(
             action=action,

@@ -20,14 +20,22 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPExceptio
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from backend.contracts import Incident, IncidentState, TelemetryEvent
+from backend.contracts import Incident, IncidentState, TelemetryEvent, RemediationRequest
 from backend.orchestrator import IncidentOrchestrator, get_orchestrator
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
 from backend.platform.knowledge_base import search_similar
 from backend.platform.storage import get_storage
+from backend.simulator.docker_controller import DockerController
+from backend.simulator.health_checker import verify_service_health
+from backend.remediation.actions import RemediationEngine
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Global State
+# ---------------------------------------------------------------------------
+docker_ctl: Optional[DockerController] = None
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -36,10 +44,17 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown."""
+    global docker_ctl
     settings = get_settings()
     storage = get_storage()
     await storage.init_db()
     logger.info("Application started — env=%s", settings.app_env)
+    
+    try:
+        docker_ctl = DockerController()
+    except Exception as e:
+        logger.warning("Could not initialize DockerController: %s", e)
+        
     yield
     await storage.close()
     logger.info("Application shutdown")
@@ -88,6 +103,13 @@ class ApprovalResponse(BaseModel):
     message: str
 
 
+class FaultInjectionRequest(BaseModel):
+    """Request to inject a specific fault via the simulator."""
+    scenario: str
+    service_name: str = "payment-service"
+    parameters: dict = {}
+
+
 # ---------------------------------------------------------------------------
 # REST Endpoints
 # ---------------------------------------------------------------------------
@@ -96,6 +118,78 @@ class ApprovalResponse(BaseModel):
 async def health():
     """Health check endpoint."""
     return {"status": "ok", "service": "autonomous-incident-response"}
+
+
+@app.get("/services/health")
+async def services_health(service: str = "payment-service"):
+    """Check the health of a specific IRAS-managed service."""
+    if docker_ctl is None:
+        raise HTTPException(status_code=503, detail="Docker controller not available")
+    
+    status = docker_ctl.check_health(service)
+    return status
+
+
+@app.post("/faults/inject")
+async def inject_fault(request: FaultInjectionRequest):
+    """Inject a fault using real Docker operations."""
+    if docker_ctl is None:
+        raise HTTPException(status_code=503, detail="Docker controller not available")
+        
+    from backend.simulator import inject_bad_deployment
+    
+    if request.scenario == "bad_deployment":
+        result = inject_bad_deployment(
+            service=request.service_name,
+            docker_controller=docker_ctl,
+            **request.parameters
+        )
+        return {
+            "status": "success",
+            "message": f"Injected {request.scenario} on {request.service_name}",
+            "docker_performed": result.docker_performed,
+            "metadata": {
+                "previous_config": result.previous_config,
+                "bad_version": result.bad_version
+            }
+        }
+    else:
+        raise HTTPException(status_code=400, detail=f"Scenario {request.scenario} not implemented for direct injection")
+
+
+@app.post("/remediation/execute")
+async def execute_remediation(request: RemediationRequest):
+    """Execute a remediation action using real Docker operations."""
+    if docker_ctl is None:
+        raise HTTPException(status_code=503, detail="Docker controller not available")
+        
+    engine = RemediationEngine(docker_controller=docker_ctl)
+    result = await engine.execute(request)
+    
+    # Also run verification if successful
+    verification = None
+    if result.success:
+        port = "5000" # Fallback port
+        if "payment-service" in request.target_service:
+            # Reconstruct the host port for HTTP health check
+            port = "5001"
+        health_url = f"http://backend:{port}/health" if "payment-service" not in request.target_service else "http://payment-service:5000/health"
+        
+        # Local direct docker-compose DNS works better
+        # For our MVP payment-service is on iras-net, so backend can reach it at payment-service:5000
+        health_url = f"http://{request.target_service}:5000/health"
+        
+        verification = await verify_service_health(
+            docker_ctl, 
+            request.target_service,
+            health_url=health_url
+        )
+    
+    return {
+        "status": "success" if result.success else "failure",
+        "result": result.model_dump(mode="json"),
+        "verification": verification.model_dump(mode="json") if verification else None
+    }
 
 
 @app.post("/incidents/trigger", response_model=TriggerResponse)

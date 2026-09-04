@@ -4,42 +4,128 @@ Each function returns a list of TelemetryEvent signals that the pipeline
 can process. The signals contain hints but NOT the answer — the root cause
 must be determined by the investigation/arbiter pipeline.
 
-Person 3 implements full fault scenarios here.
-For the foundation, one scenario is fully implemented; others are stubs.
+Real Docker fault injection:
+    When a ``DockerController`` is provided, ``inject_bad_deployment``
+    also performs actual container replacement (healthy → bad).  The full
+    container configuration is serialized into the telemetry metadata so
+    that the remediation engine can restore it exactly.
+
+Mock mode (no controller):
+    Returns deterministic TelemetryEvent signals only — unchanged from
+    the original foundation implementation.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from backend.contracts import TelemetryEvent
 
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import ContainerConfig, DockerController
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Result type for real fault injection
+# ---------------------------------------------------------------------------
+
+class FaultInjectionResult:
+    """Bundles telemetry signals with Docker-side metadata."""
+
+    def __init__(
+        self,
+        signals: list[TelemetryEvent],
+        *,
+        docker_performed: bool = False,
+        previous_config: dict[str, Any] | None = None,
+        bad_version: str = "",
+        service: str = "",
+    ):
+        self.signals = signals
+        self.docker_performed = docker_performed
+        self.previous_config = previous_config
+        self.bad_version = bad_version
+        self.service = service
+
+
+# ---------------------------------------------------------------------------
+# Bad Deployment
+# ---------------------------------------------------------------------------
 
 def inject_bad_deployment(
     service: str = "payment-service",
     version: str = "v2.4.1",
     deployed_seconds_ago: float = 30.0,
-) -> list[TelemetryEvent]:
+    docker_controller: DockerController | None = None,
+) -> FaultInjectionResult:
     """Simulate a bad deployment — new version causes errors and latency spike.
 
-    Signals are ordered chronologically. The deploy event comes FIRST,
-    then the errors/latency follow.
+    **Mock mode** (``docker_controller is None``):
+        Returns deterministic telemetry signals only.
+
+    **Real mode** (``docker_controller`` provided):
+        1. Saves the complete configuration of the currently-healthy container.
+        2. Removes the healthy container.
+        3. Starts the same image with ``FORCE_UNHEALTHY=true``.
+        4. Returns telemetry signals *plus* the saved config for rollback.
 
     Returns:
-        List of TelemetryEvent signals representing the incident.
+        ``FaultInjectionResult`` containing signals and optional Docker metadata.
     """
     now = datetime.now(timezone.utc)
+
+    # ── Docker fault injection ──────────────────────────────────────────
+    previous_config_dict: dict[str, Any] | None = None
+    docker_performed = False
+
+    if docker_controller is not None:
+        saved = docker_controller.save_container_config(service)
+        if saved is None:
+            logger.error("Cannot inject bad deployment: no container found for %s", service)
+        else:
+            previous_config_dict = dataclasses.asdict(saved)
+            logger.info(
+                "Saved config for %s (image=%s, version=%s)",
+                service, saved.image, saved.version,
+            )
+            # Remove healthy container and start the bad one
+            docker_controller.remove_container(service, force=True)
+            bad_container = docker_controller.deploy_version(
+                saved,
+                version_override=version,
+                env_overrides={"FORCE_UNHEALTHY": "true", "SERVICE_VERSION": version},
+            )
+            if bad_container is not None:
+                docker_performed = True
+                logger.info("Bad deployment injected: %s → %s", service, version)
+            else:
+                logger.error("Failed to start bad version for %s", service)
+
+    # ── Telemetry signals (always generated) ────────────────────────────
+    deploy_metadata: dict[str, Any] = {
+        "log_message": f"Deployment {version} rolled out to {service}",
+        "version": version,
+        "deployed_seconds_ago": deployed_seconds_ago,
+    }
+    # Embed rollback config in the deploy event so the pipeline can pass
+    # it through to the remediation stage.
+    if previous_config_dict is not None:
+        deploy_metadata["previous_config"] = previous_config_dict
+        deploy_metadata["docker_performed"] = True
+
     signals = [
         TelemetryEvent(
             timestamp=now,
             source=service,
             event_type="deploy",
             value=version,
-            metadata={
-                "log_message": f"Deployment {version} rolled out to {service}",
-                "version": version,
-                "deployed_seconds_ago": deployed_seconds_ago,
-            },
+            metadata=deploy_metadata,
         ),
         TelemetryEvent(
             timestamp=now,
@@ -73,7 +159,14 @@ def inject_bad_deployment(
             },
         ),
     ]
-    return signals
+
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        previous_config=previous_config_dict,
+        bad_version=version,
+        service=service,
+    )
 
 
 def inject_database_failure(
