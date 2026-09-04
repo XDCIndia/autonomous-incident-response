@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend.contracts import Incident, IncidentState, TelemetryEvent
-from backend.orchestrator import IncidentOrchestrator
+from backend.orchestrator import IncidentOrchestrator, get_orchestrator
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
 from backend.platform.storage import get_storage
@@ -80,6 +80,13 @@ class TriggerResponse(BaseModel):
     message: str
 
 
+class ApprovalResponse(BaseModel):
+    """Response after approving/rejecting an incident."""
+    incident_id: str
+    status: str
+    message: str
+
+
 # ---------------------------------------------------------------------------
 # REST Endpoints
 # ---------------------------------------------------------------------------
@@ -133,8 +140,10 @@ async def trigger_incident(request: TriggerRequest):
     storage = get_storage()
     await storage.save_incident(incident)
 
-    # Run pipeline in background
-    orchestrator = IncidentOrchestrator(storage=storage, event_bus=get_event_bus())
+    # Run pipeline in background (use singleton orchestrator for approval support)
+    orchestrator = get_orchestrator()
+    orchestrator.storage = storage
+    orchestrator.event_bus = get_event_bus()
 
     async def _run():
         try:
@@ -179,6 +188,56 @@ async def get_incident(incident_id: str):
     return incident.model_dump(mode="json")
 
 
+@app.post("/incidents/{incident_id}/approve", response_model=ApprovalResponse)
+async def approve_incident(incident_id: str):
+    """Approve remediation for a SEMI_AUTONOMOUS incident."""
+    storage = get_storage()
+    incident = await storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    orchestrator = get_orchestrator()
+    processed = await orchestrator.approve(incident_id)
+
+    if not processed:
+        return ApprovalResponse(
+            incident_id=incident_id,
+            status="no_pending_approval",
+            message="No pending approval for this incident",
+        )
+
+    return ApprovalResponse(
+        incident_id=incident_id,
+        status="approved",
+        message="Remediation approved — pipeline will continue",
+    )
+
+
+@app.post("/incidents/{incident_id}/reject", response_model=ApprovalResponse)
+async def reject_incident(incident_id: str):
+    """Reject remediation for a SEMI_AUTONOMOUS incident."""
+    storage = get_storage()
+    incident = await storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    orchestrator = get_orchestrator()
+    processed = await orchestrator.reject(incident_id)
+
+    if not processed:
+        return ApprovalResponse(
+            incident_id=incident_id,
+            status="no_pending_approval",
+            message="No pending approval for this incident",
+        )
+
+    return ApprovalResponse(
+        incident_id=incident_id,
+        status="rejected",
+        message="Remediation rejected — skipping to report",
+    )
+
+
 @app.get("/incidents/{incident_id}/timeline")
 async def get_timeline(incident_id: str):
     """Get the timeline for an incident."""
@@ -195,6 +254,17 @@ async def get_timeline(incident_id: str):
 # ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
+
+@app.get("/incidents/{incident_id}/approval")
+async def get_approval_status(incident_id: str):
+    """Check if an incident has a pending approval."""
+    orchestrator = get_orchestrator()
+    has_pending = incident_id in orchestrator._approval_events
+    return {
+        "incident_id": incident_id,
+        "has_pending_approval": has_pending,
+    }
+
 
 @app.websocket("/ws/incidents/{incident_id}")
 async def websocket_incident(websocket: WebSocket, incident_id: str):
