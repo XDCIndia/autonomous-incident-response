@@ -44,6 +44,7 @@ class IncidentState(str, Enum):
     VERIFYING = "verifying"
     RESOLVED = "resolved"
     ESCALATED = "escalated"
+    REJECTED = "rejected"      # Human rejected remediation — not recovered
     FAILED = "failed"
 
 
