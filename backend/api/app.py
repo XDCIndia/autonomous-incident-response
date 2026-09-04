@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from typing import Optional, Any
@@ -32,7 +31,12 @@ from backend.platform.knowledge_base import search_similar
 from backend.platform.storage import get_storage
 from backend.simulator.docker_controller import DockerController
 from backend.simulator.toxiproxy_client import ToxiproxyClient
-from backend.simulator.health_checker import ServiceHealthVerifier, verify_service_health
+from backend.simulator.health_checker import (
+    ServiceHealthVerifier,
+    build_verify_urls,
+    use_service_dns,
+    verify_service_health,
+)
 from backend.remediation.actions import RemediationEngine
 
 logger = logging.getLogger(__name__)
@@ -52,12 +56,6 @@ _target_monitor_task: Optional[asyncio.Task] = None
 # ---------------------------------------------------------------------------
 # Real-environment wiring
 # ---------------------------------------------------------------------------
-
-def _use_service_dns() -> bool:
-    """True when the backend runs inside the docker-compose network, where
-    services are reachable by DNS name instead of published host ports."""
-    return os.environ.get("IRAS_SERVICE_DNS", "").strip().lower() in ("1", "true", "yes", "on")
-
 
 async def _real_env_available() -> bool:
     """Detect whether the IRAS service stack (payment-service + toxiproxy
@@ -114,7 +112,7 @@ async def _ensure_real_orchestrator() -> bool:
             return False
 
         verifier = (
-            ServiceHealthVerifier(docker_ctl, use_service_dns=_use_service_dns())
+            ServiceHealthVerifier(docker_ctl, use_service_dns=use_service_dns())
             if docker_ctl is not None
             else None
         )
@@ -541,28 +539,21 @@ async def execute_remediation(request: RemediationRequest):
         logger.error("Remediation failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Remediation failed: {e}")
 
-    # Also run verification if successful — use host-mapped ports for HTTP checks
+    # Also run verification if successful.  The probe URLs are environment-
+    # aware: from inside the docker-compose network the service is reached by
+    # DNS name (http://iras-payment-service:5000), from the host through the
+    # published port (http://localhost:5001).
     verification = None
     if result.success:
-        host_port_map = {
-            "payment-service": "5001",
-            "rpc-service-primary": "5002",
-            "rpc-service-secondary": "5003",
-            "db-service": "5004",
-        }
-        port = host_port_map.get(request.target_service, "5000")
-        health_url = f"http://localhost:{port}/health"
-
-        verify_urls = []
-        if request.target_service == "payment-service" and request.action in ("circuit_break", "switch_to_secondary", "reset_connection_pool"):
-            verify_urls.append(f"http://localhost:{port}/pay")
-
+        health_url, verify_urls = build_verify_urls(
+            request.target_service, request.action, use_service_dns()
+        )
         try:
             verification = await verify_service_health(
                 docker_ctl,
                 request.target_service,
                 health_url=health_url,
-                verify_urls=verify_urls
+                verify_urls=verify_urls,
             )
         except Exception as e:
             logger.warning("Verification failed after remediation: %s", e)

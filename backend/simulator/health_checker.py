@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, TYPE_CHECKING
 
@@ -25,6 +26,18 @@ logger = logging.getLogger(__name__)
 # HTTP actions that restore payment-service business function — verification
 # should probe /pay for these, not just /health.
 _PAY_VERIFY_ACTIONS = ("circuit_break", "switch_to_secondary", "reset_connection_pool")
+
+
+def use_service_dns() -> bool:
+    """True when the backend runs inside the docker-compose network.
+
+    Inside the network, services are reachable by their DNS name
+    (``http://iras-payment-service:5000``) instead of the published host
+    ports (``http://localhost:5001``).  Controlled by the ``IRAS_SERVICE_DNS``
+    env var — set to ``true`` for the backend service in docker-compose.yml,
+    unset/false for host-side dev and the test suite.
+    """
+    return os.environ.get("IRAS_SERVICE_DNS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -202,6 +215,42 @@ def _dns_hostname(service_name: str) -> str:
     return f"iras-{service_name}"
 
 
+def service_base_url(service_name: str, use_dns: bool) -> str:
+    """Base URL (scheme://host:port) used to verify *service_name*.
+
+      - use_dns=True  (backend inside the compose network): the stable
+        container name ``iras-<service>`` on the in-container port 5000.
+      - use_dns=False (backend on the host): the published host port
+        (``localhost:5001`` etc.), defaulting to 5000 for unknown services.
+    """
+    if use_dns:
+        return f"http://{_dns_hostname(service_name)}:{_service_port(service_name)}"
+    port = _get_host_port(service_name)
+    return f"http://localhost:{port or '5000'}"
+
+
+def build_verify_urls(
+    service_name: str,
+    action: str,
+    use_dns: bool,
+) -> tuple[str, list[str]]:
+    """Return ``(health_url, verify_urls)`` for verifying *service_name*.
+
+    The health probe always hits ``/health``.  For payment-service recovery
+    actions (``_PAY_VERIFY_ACTIONS``) an extra ``/pay`` probe is added —
+    those actions only count as recovery when the business endpoint works
+    again (fallback engaged / DB reachable).  The URL scheme follows
+    ``use_dns`` so verification works from inside the compose network as
+    well as from the host.
+    """
+    base_url = service_base_url(service_name, use_dns)
+    health_url = f"{base_url}/health"
+    verify_urls: list[str] = []
+    if service_name == "payment-service" and action in _PAY_VERIFY_ACTIONS:
+        verify_urls.append(f"{base_url}/pay")
+    return health_url, verify_urls
+
+
 class ServiceHealthVerifier:
     """Real verification adapter for the orchestrator pipeline.
 
@@ -228,18 +277,7 @@ class ServiceHealthVerifier:
         service = incident.service_name
         action = incident.remediation_request.action if incident.remediation_request else ""
 
-        if self._use_service_dns:
-            base_url = f"http://{_dns_hostname(service)}:{_service_port(service)}"
-        else:
-            port = _get_host_port(service)
-            base_url = f"http://localhost:{port}" if port else ""
-
-        health_url = f"{base_url}/health" if base_url else ""
-        verify_urls: list[str] = []
-        if base_url and service == "payment-service" and action in _PAY_VERIFY_ACTIONS:
-            # These actions are only 'recovery' if the business endpoint works
-            # again (fallback engaged / DB reachable).
-            verify_urls.append(f"{base_url}/pay")
+        health_url, verify_urls = build_verify_urls(service, action, self._use_service_dns)
 
         result = await verify_service_health(
             self._docker,

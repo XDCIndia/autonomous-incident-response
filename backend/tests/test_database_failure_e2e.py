@@ -85,11 +85,21 @@ async def test_database_failure_e2e():
         assert verification["verified"] is True
         
         metrics = verification["recovered_metrics"]
-        
-        # Expecting our extra verify check for /pay to be present
-        # The verify URL uses host-mapped port (localhost:5001) not Docker-internal
-        verify_pay_key = "verify_http://localhost:5001/pay"
-        assert verify_pay_key in metrics
-        assert metrics[verify_pay_key] == 200
-        
+
+        # Expecting our extra verify check for /pay to be present.  The probe
+        # URL depends on where the backend runs: a host-side backend verifies
+        # through the published port (verify_http://localhost:5001/pay), while
+        # a backend inside the compose network verifies through Docker DNS
+        # (verify_http://iras-payment-service:5000/pay) — accept either.
+        pay_metric = next(
+            (
+                value
+                for key, value in metrics.items()
+                if key.startswith("verify_") and key.endswith("/pay")
+            ),
+            None,
+        )
+        assert pay_metric is not None, f"expected a /pay verification probe, got: {metrics}"
+        assert pay_metric == 200, f"expected /pay verification probe to pass, got: {metrics}"
+
         print("Remediation and verification succeeded for DB Failure.")

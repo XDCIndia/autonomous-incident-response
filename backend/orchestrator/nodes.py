@@ -131,23 +131,30 @@ class VerificationInterface:
     endpoint probe for certain remediation actions) via
     backend.simulator.health_checker.verify_service_health — the same
     function backend/api/app.py's /remediation/execute endpoint already uses,
-    with the same service -> host-port mapping. Falls back to echoing
+    with the same environment-aware URL construction
+    (health_checker.build_verify_urls). Falls back to echoing
     remediation_result.success (the original stub behavior) when no
     controller is available — local dev without Docker, or tests — or if the
     real check itself raises, so the pipeline never crashes at this stage.
+
+    ``use_service_dns`` selects how HTTP checks reach the service:
+      - None (default): resolved from the ``IRAS_SERVICE_DNS`` env var
+        (True when the backend runs inside the docker-compose network).
+      - False: services are reached through their published host ports
+        (``http://localhost:5001``) — host-run backend.
+      - True: services are reached by their stable container name
+        (``http://iras-payment-service:5000``) — backend inside the
+        compose network.
     """
 
-    # Same service -> host-port mapping as backend/api/app.py's
-    # /remediation/execute endpoint (health_checker.py duplicates this too).
-    _HOST_PORT_MAP = {
-        "payment-service": "5001",
-        "rpc-service-primary": "5002",
-        "rpc-service-secondary": "5003",
-        "db-service": "5004",
-    }
-
-    def __init__(self, docker_ctl: Optional["DockerController"] = None):
+    def __init__(
+        self,
+        docker_ctl: Optional["DockerController"] = None,
+        *,
+        use_service_dns: Optional[bool] = None,
+    ):
         self._docker = docker_ctl
+        self._use_service_dns = use_service_dns
 
     async def verify(self, incident: Incident) -> VerificationResult:
         """Verify that remediation was effective."""
@@ -164,17 +171,18 @@ class VerificationInterface:
         )
         action = incident.remediation_request.action if incident.remediation_request else ""
 
-        port = self._HOST_PORT_MAP.get(target_service, "5000")
-        health_url = f"http://localhost:{port}/health"
-        verify_urls = []
-        if target_service == "payment-service" and action in (
-            "circuit_break",
-            "switch_to_secondary",
-            "reset_connection_pool",
-        ):
-            verify_urls.append(f"http://localhost:{port}/pay")
+        from backend.simulator.health_checker import (
+            build_verify_urls,
+            use_service_dns,
+            verify_service_health,
+        )
 
-        from backend.simulator.health_checker import verify_service_health
+        use_dns = (
+            self._use_service_dns
+            if self._use_service_dns is not None
+            else use_service_dns()
+        )
+        health_url, verify_urls = build_verify_urls(target_service, action, use_dns)
 
         try:
             result = await verify_service_health(
