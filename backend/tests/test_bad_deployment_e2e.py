@@ -46,11 +46,25 @@ async def test_bad_deployment_e2e():
         assert previous_config is not None, "previous_config was not returned"
         assert metadata.get("bad_version") == "v2.4.1-bad"
         
-        # 3. Verify service is now unhealthy
-        time.sleep(3) # Wait for healthcheck to fail
-        resp = await client.get(f"{API_URL}/services/health?service=payment-service")
-        status_data = resp.json()
-        assert status_data.get("health") != "healthy", "Service should not be healthy after bad deployment"
+        # 3. Verify the bad version genuinely degraded the service.  Probe the
+        #    app's own /health (FORCE_UNHEALTHY=true -> HTTP 500 as soon as it
+        #    starts) rather than Docker's health status: a freshly recreated
+        #    container reports `starting` through the healthcheck start_period
+        #    (~5-10s) regardless of what the app does, so `!= healthy` used to
+        #    pass even when nothing actually broke (issue #18).
+        degraded = False
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                resp = await client.get("http://localhost:5001/health", timeout=5.0)
+                if resp.status_code != 200:
+                    degraded = True
+                    break
+            except Exception:
+                degraded = True
+                break
+            time.sleep(1)
+        assert degraded, "payment-service /health still returned 200 after the bad deployment"
         
         # 4. Execute Remediation (Rollback)
         remediation_payload = {
