@@ -16,7 +16,17 @@ from backend.platform.storage import Storage
 
 
 @pytest.fixture(autouse=True)
-async def reset_storage():
+async def reset_storage(monkeypatch):
+    # Blank any LLM provider keys from the local `.env` — see the identical
+    # fixture in backend/tests/e2e/test_pipeline.py for why this matters now
+    # that IncidentOrchestrator() defaults to real LLM-backed agents whenever
+    # a key is configured.
+    import backend.platform.config as config_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    config_module._settings = None
+
     storage = Storage(db_path=":memory:")
     await storage.init_db()
     storage_module._storage = storage
@@ -24,6 +34,7 @@ async def reset_storage():
     await storage.close()
     storage_module._storage = None
     orchestrator_module._orchestrator = None
+    config_module._settings = None
 
 
 class TestKnowledgeBaseEndpoint:

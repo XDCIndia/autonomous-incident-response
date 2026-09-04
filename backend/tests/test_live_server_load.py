@@ -27,7 +27,17 @@ def _free_port() -> int:
 def live_server(tmp_path_factory):
     port = _free_port()
     workdir = tmp_path_factory.mktemp("live_server")
-    env = {**os.environ, "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db"}
+    env = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db",
+        # This suite tests real HTTP/concurrency behavior against the live
+        # server, not LLM quality or latency — blank any provider keys from
+        # the local `.env` (inherited via os.environ above) so the server
+        # process resolves incidents with the deterministic mock agents
+        # instead of making real, slow/network-dependent LLM API calls.
+        "ANTHROPIC_API_KEY": "",
+        "OPENAI_API_KEY": "",
+    }
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "backend.api.app:app", "--host", "127.0.0.1", "--port", str(port)],
