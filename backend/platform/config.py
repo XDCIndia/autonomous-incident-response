@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     # Severity thresholds
     approval_timeout_minutes: int = 15
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
+    # and isn't backend config — reject only unknown *backend* keys, not those.
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 _settings: Settings | None = None

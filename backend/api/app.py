@@ -24,6 +24,7 @@ from backend.contracts import Incident, IncidentState, TelemetryEvent
 from backend.orchestrator import IncidentOrchestrator, get_orchestrator
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
+from backend.platform.knowledge_base import search_similar
 from backend.platform.storage import get_storage
 
 logger = logging.getLogger(__name__)
@@ -236,6 +237,14 @@ async def reject_incident(incident_id: str):
         status="rejected",
         message="Remediation rejected — skipping to report",
     )
+
+
+@app.get("/knowledge-base/search")
+async def search_knowledge_base(query: str = Query(..., min_length=1), top_k: int = Query(3, ge=1, le=10)):
+    """Search historical incidents similar to `query` (TF-IDF cosine similarity)."""
+    storage = get_storage()
+    results = await search_similar(storage, query, top_k=top_k)
+    return {"query": query, "results": results}
 
 
 @app.get("/incidents/{incident_id}/timeline")
