@@ -51,21 +51,39 @@ class MockLogInvestigator(LogInvestigator):
                 continue
             evidence.append(f"[{sig.source}] {msg}")
 
-            # Keyword-based root cause detection (deterministic)
+            # Keyword-based root cause detection (deterministic).
+            # Order matters: dependency-outage text must be recognised before
+            # generic "timeout" text, which otherwise maps to database_failure
+            # and would send the wrong remediation action to the real env.
             msg_lower = msg.lower()
-            if "500" in msg or "error" in msg_lower:
-                confidence = 0.85
-                hypothesis = f"Detected errors from {sig.source}"
-                root_cause = sig.metadata.get("root_cause_hint", "service_error")
-            if "deploy" in msg_lower or "version" in msg_lower:
+            if (
+                "timeout calling" in msg_lower
+                or "gateway timeout" in msg_lower
+                or "not responding" in msg_lower
+                or "circuit breaker open" in msg_lower
+                or " 504 " in msg_lower
+            ):
+                confidence = 0.87
+                hypothesis = f"Upstream dependency timeout from {sig.source}"
+                root_cause = sig.metadata.get("root_cause_hint", "dependency_outage")
+            elif (
+                "connection pool" in msg_lower
+                or "no available connections" in msg_lower
+                or "database connection" in msg_lower
+                or "query timeout" in msg_lower
+            ):
+                confidence = 0.88
+                hypothesis = f"Connection/timeout issues from {sig.source}"
+                root_cause = sig.metadata.get("root_cause_hint", "database_failure")
+            elif "deploy" in msg_lower or "version" in msg_lower:
                 confidence = 0.90
                 hypothesis = f"Deployment detected near error window for {sig.source}"
                 root_cause = "bad_deployment"
-            if "timeout" in msg_lower or "connection pool" in msg_lower:
-                confidence = 0.88
-                hypothesis = f"Connection/timeout issues from {sig.source}"
-                root_cause = "database_failure"
-            if "latency" in msg_lower and "ms" in msg_lower:
+            elif "500" in msg or "error" in msg_lower:
+                confidence = 0.85
+                hypothesis = f"Detected errors from {sig.source}"
+                root_cause = sig.metadata.get("root_cause_hint", "service_error")
+            elif "latency" in msg_lower and "ms" in msg_lower:
                 confidence = 0.82
                 hypothesis = f"High latency detected for {sig.source}"
 

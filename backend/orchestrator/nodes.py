@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from backend.simulator.docker_controller import DockerController
@@ -43,6 +43,35 @@ from backend.platform.storage import Storage
 from backend.remediation.actions import RemediationEngine
 
 logger = logging.getLogger(__name__)
+
+# Metadata keys that real fault injection attaches to signals and that the
+# real remediation engine needs (e.g. rollback_deploy requires the saved
+# container config, toxiproxy actions require proxy/toxic names).
+REMEDIATION_PARAM_KEYS = (
+    "previous_config",
+    "proxy_name",
+    "toxic_name",
+    "toxic_type",
+    "secondary_upstream",
+    "previous_upstream",
+)
+
+
+def collect_remediation_parameters(incident: Incident) -> dict[str, Any]:
+    """Collect environment metadata from injected signals for remediation.
+
+    Real fault injection embeds everything the remediation engine needs into
+    the telemetry metadata (see ``backend.simulator.scenarios``):
+      - bad_deployment      → previous_config (saved healthy container config)
+      - database_failure    → proxy_name / toxic_name on the db proxy
+      - dependency_outage   → proxy_name / toxic_name / secondary_upstream
+    """
+    params: dict[str, Any] = {}
+    for sig in incident.signals:
+        for key in REMEDIATION_PARAM_KEYS:
+            if key in sig.metadata and key not in params:
+                params[key] = sig.metadata[key]
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +430,10 @@ class OrchestratorNodes:
                 f"on '{incident.service_name}'"
             ),
             target_service=incident.service_name,
+            # Parameters captured from the real fault injection (saved
+            # container config, toxiproxy proxy/toxic names). Empty in mock
+            # mode, where the mock remediation engine ignores them.
+            parameters=collect_remediation_parameters(incident),
             requires_approval=requires_approval,
         )
 

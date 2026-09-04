@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional, Any
 
@@ -21,14 +22,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.contracts import Incident, IncidentState, TelemetryEvent, RemediationRequest
-from backend.orchestrator import IncidentOrchestrator, get_orchestrator
+from backend.orchestrator import IncidentOrchestrator, get_orchestrator, configure_orchestrator
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
 from backend.platform.knowledge_base import search_similar
 from backend.platform.storage import get_storage
 from backend.simulator.docker_controller import DockerController
 from backend.simulator.toxiproxy_client import ToxiproxyClient
-from backend.simulator.health_checker import verify_service_health
+from backend.simulator.health_checker import ServiceHealthVerifier, verify_service_health
 from backend.remediation.actions import RemediationEngine
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,88 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 docker_ctl: Optional[DockerController] = None
 toxiproxy_ctl: Optional[ToxiproxyClient] = None
+# True once the singleton orchestrator has been wired to the real environment.
+_real_env_configured: bool = False
+_real_env_lock: asyncio.Lock = asyncio.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Real-environment wiring
+# ---------------------------------------------------------------------------
+
+def _use_service_dns() -> bool:
+    """True when the backend runs inside the docker-compose network, where
+    services are reachable by DNS name instead of published host ports."""
+    return os.environ.get("IRAS_SERVICE_DNS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _real_env_available() -> bool:
+    """Detect whether the IRAS service stack (payment-service + toxiproxy
+    proxies) is actually running so the pipeline can drive it."""
+    if docker_ctl is None:
+        return False
+    try:
+        status = await docker_ctl.check_health("payment-service")
+        if not status.get("running"):
+            return False
+        if toxiproxy_ctl is None:
+            return False
+        rpc_proxy = await asyncio.to_thread(toxiproxy_ctl.get_proxy, "payment-rpc-proxy")
+        db_proxy = await asyncio.to_thread(toxiproxy_ctl.get_proxy, "payment-db-proxy")
+        return rpc_proxy is not None and db_proxy is not None
+    except Exception as e:
+        logger.warning("Real environment detection failed: %s", e)
+        return False
+
+
+async def _ensure_real_orchestrator() -> bool:
+    """Wire the singleton orchestrator to the real Docker/Toxiproxy
+    environment when it is available (settings.real_env = auto|on).
+
+    Once wired, /incidents/trigger performs real fault injection, remediation
+    and verification. When the environment is not available, the default
+    mock orchestrator is kept (unit tests / local runs stay deterministic).
+    """
+    global _real_env_configured
+    if _real_env_configured:
+        return True
+
+    async with _real_env_lock:
+        if _real_env_configured:
+            return True
+
+        mode = get_settings().real_env.strip().lower()
+        if mode == "off":
+            return False
+        if mode == "on":
+            available = docker_ctl is not None and toxiproxy_ctl is not None
+        else:  # auto
+            available = await _real_env_available()
+        if not available:
+            return False
+
+        existing = get_orchestrator()
+        if existing._approval_events:
+            # Do not swap the singleton while an approval is pending elsewhere.
+            logger.warning("Real environment available but approvals pending — keeping current orchestrator")
+            return False
+
+        verifier = (
+            ServiceHealthVerifier(docker_ctl, use_service_dns=_use_service_dns())
+            if docker_ctl is not None
+            else None
+        )
+        configure_orchestrator(
+            remediation_engine=RemediationEngine(
+                docker_controller=docker_ctl,
+                toxiproxy_client=toxiproxy_ctl,
+            ),
+            verification=verifier,
+        )
+        _real_env_configured = True
+        logger.info("Orchestrator wired to real environment (real_env=%s)", mode)
+        return True
+
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -83,7 +166,14 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         logger.warning("Could not initialize ToxiproxyClient: %s", e)
-        
+
+    # Wire the pipeline to the real environment if the IRAS service stack is
+    # already up (compose starts payment-service before the backend).
+    try:
+        await _ensure_real_orchestrator()
+    except Exception as e:
+        logger.warning("Could not wire real orchestrator: %s", e)
+
     yield
     await storage.close()
     logger.info("Application shutdown")
@@ -308,18 +398,42 @@ async def trigger_incident(request: TriggerRequest):
         state=IncidentState.CREATED,
     )
 
-    # Inject signals based on scenario
+    # Wire to the real environment when it is available so the fault below is
+    # actually injected into the running Docker/Toxiproxy services.  When the
+    # real environment is NOT available the whole pipeline stays in mock mode
+    # (mock signals + mock remediation) so the two never mix.
+    #
+    # resource_exhaustion is deliberately excluded from this wiring — its
+    # injection stays mock-signal-only here even when the real environment is
+    # available (real CPU-exhaustion injection exists for /faults/inject, see
+    # backend/simulator/scenarios.py's docker_controller param, but wiring it
+    # into the autonomous trigger flow too is a separate follow-up).
+    use_real_env = await _ensure_real_orchestrator()
+
+    # Inject the fault into the real environment (when available) and collect
+    # the telemetry that the investigators will reason about.
+    #
     # Note: inject_bad_deployment and inject_resource_exhaustion are async
-    # (use async DockerController); the others are sync (use sync
-    # ToxiproxyClient or are pure mock). None of these pass docker_ctl/
-    # toxiproxy_ctl here, so this endpoint stays mock-signal-only for all
-    # four scenarios — real injection is only wired up via /faults/inject.
+    # (async DockerController); database/dependency use a sync ToxiproxyClient
+    # (run via to_thread) and degrade to mock signals when no controller is
+    # passed.
     if request.scenario == "bad_deployment":
-        result = await inject_bad_deployment(service=request.service_name)
+        result = await inject_bad_deployment(
+            service=request.service_name,
+            docker_controller=docker_ctl if use_real_env else None,
+        )
     elif request.scenario == "database_failure":
-        result = inject_database_failure(service=request.service_name)
+        result = await asyncio.to_thread(
+            inject_database_failure,
+            service=request.service_name,
+            toxiproxy_client=toxiproxy_ctl if use_real_env else None,
+        )
     elif request.scenario == "dependency_outage":
-        result = inject_dependency_outage(service=request.service_name)
+        result = await asyncio.to_thread(
+            inject_dependency_outage,
+            service=request.service_name,
+            toxiproxy_client=toxiproxy_ctl if use_real_env else None,
+        )
     elif request.scenario == "resource_exhaustion":
         result = await inject_resource_exhaustion(service=request.service_name)
     else:

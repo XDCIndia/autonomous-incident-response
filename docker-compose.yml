@@ -13,6 +13,12 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # Reach Toxiproxy and the mock services over the compose network
+      # (the backend runs inside this network, not on the host).
+      - TOXIPROXY_URL=http://toxiproxy:8474
+      - IRAS_SERVICE_DNS=true
+      - REAL_ENV=auto
     volumes:
       - ./backend:/app/backend
       # Docker socket mount — allows the backend to manage containers

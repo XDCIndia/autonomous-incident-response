@@ -27,19 +27,26 @@ def _free_port() -> int:
 def live_server(tmp_path_factory):
     port = _free_port()
     workdir = tmp_path_factory.mktemp("live_server")
+    # This file exercises concurrency/persistence against a *mock* pipeline
+    # against synthetic service names (e.g. "load-svc-N") that don't
+    # correspond to actual containers — it doesn't stand up the
+    # docker-compose service stack. Two independent real-env gates need to
+    # be suppressed together, since neither alone covers both code paths:
+    #   - REAL_ENV=off stops configure_orchestrator() from swapping in the
+    #     real RemediationEngine/ServiceHealthVerifier (see backend/api/app.py
+    #     _ensure_real_orchestrator()).
+    #   - DOCKER_HOST pointed at a nonexistent socket stops DockerController's
+    #     startup ping() from succeeding, so get_orchestrator(docker_ctl=...)
+    #     (see backend/orchestrator/__init__.py) falls back to the
+    #     verification stage's no-Docker stub too.
+    # Without both, a real Docker daemon happening to be reachable on this
+    # machine would make either path do real (but unhelpful, since these
+    # services don't exist) health checks, and load-test incidents would
+    # never resolve.
     env = {
         **os.environ,
         "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db",
-        # This suite tests real HTTP/concurrency behavior against synthetic
-        # service names (e.g. "load-svc-N") that don't correspond to actual
-        # containers — it doesn't stand up the docker-compose service stack.
-        # Point DOCKER_HOST at a socket that can't exist so DockerController's
-        # startup ping() fails and the app falls back to None, keeping the
-        # orchestrator's verification stage on its deterministic stub even
-        # when a real Docker daemon happens to be reachable on this machine
-        # (otherwise the incident pipeline's real health check correctly, but
-        # unhelpfully for this suite, reports these nonexistent services as
-        # unhealthy and the incidents never resolve).
+        "REAL_ENV": "off",
         "DOCKER_HOST": "unix:///nonexistent/docker.sock",
         # Likewise blank any LLM provider keys from the local `.env` (this
         # suite tests HTTP/concurrency, not LLM quality/latency) so the

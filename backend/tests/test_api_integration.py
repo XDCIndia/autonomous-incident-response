@@ -239,12 +239,22 @@ class TestWebSocketLiveTimeline:
             time.sleep(2.0)
 
             with client.websocket_connect(f"/ws/incidents/{incident_id}") as ws:
+                # Break as soon as the terminal "report" stage is seen, not
+                # just on a ping: by the time this connects, the (mock,
+                # near-instant) pipeline has usually already finished, so
+                # /ws/incidents/{id} replays the full stored history and then
+                # has no new live event left to send — waiting for a ping
+                # instead means blocking on the endpoint's full 30s keepalive
+                # timeout for no reason, since the history replay alone
+                # already proves what this test asserts.
                 events = []
                 for _ in range(20):
                     data = ws.receive_json()
                     if data.get("type") == "ping":
                         break
                     events.append(data)
+                    if data.get("stage") == "report":
+                        break
                 stages = [e["stage"] for e in events]
                 assert stages == sorted(stages, key=lambda s: events[stages.index(s)].get("timestamp", ""))
                 assert stages[0] == "detection"

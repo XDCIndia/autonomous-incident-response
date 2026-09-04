@@ -14,10 +14,17 @@ import logging
 from dataclasses import dataclass, field, asdict
 from typing import Any, TYPE_CHECKING
 
+from backend.contracts import VerificationResult as ContractVerificationResult
+
 if TYPE_CHECKING:
+    from backend.contracts import Incident
     from backend.simulator.docker_controller import DockerController
 
 logger = logging.getLogger(__name__)
+
+# HTTP actions that restore payment-service business function — verification
+# should probe /pay for these, not just /health.
+_PAY_VERIFY_ACTIONS = ("circuit_break", "switch_to_secondary", "reset_connection_pool")
 
 
 @dataclass
@@ -177,3 +184,74 @@ def _get_host_port(service_name: str) -> str | None:
         "db-service": "5004",
     }
     return port_map.get(service_name)
+
+
+def _service_port(service_name: str) -> str:
+    """In-container service port (all mock services listen on 5000)."""
+    return "5000"
+
+
+def _dns_hostname(service_name: str) -> str:
+    """Stable DNS name for a service from inside the compose network.
+
+    Uses the container name (``iras-<service>``) rather than the compose
+    service name: remediation recreates containers standalone via
+    ``DockerController.deploy_version`` (e.g. rollback of a bad deployment),
+    which drops the compose service-name alias but keeps the container name.
+    """
+    return f"iras-{service_name}"
+
+
+class ServiceHealthVerifier:
+    """Real verification adapter for the orchestrator pipeline.
+
+    Implements the duck-typed ``verify(incident)`` interface the graph's
+    ``verify`` node expects (see ``backend.orchestrator.nodes``), backed by
+    the existing multi-layer ``verify_service_health`` so the pipeline checks
+    the actual container + HTTP state after remediation instead of assuming
+    ``remediation_result.success`` means recovery.
+
+    ``use_service_dns`` selects how HTTP checks reach the service:
+      - False (default, host-run backend): services are reached through their
+        published host ports (``http://localhost:5001``).
+      - True (backend inside the docker-compose network): services are
+        reached by their stable container name
+        (``http://iras-payment-service:5000``) — see ``_dns_hostname``.
+    """
+
+    def __init__(self, docker_ctl: DockerController, *, use_service_dns: bool = False):
+        self._docker = docker_ctl
+        self._use_service_dns = use_service_dns
+
+    async def verify(self, incident: Incident) -> ContractVerificationResult:
+        """Verify that the incident's service genuinely recovered."""
+        service = incident.service_name
+        action = incident.remediation_request.action if incident.remediation_request else ""
+
+        if self._use_service_dns:
+            base_url = f"http://{_dns_hostname(service)}:{_service_port(service)}"
+        else:
+            port = _get_host_port(service)
+            base_url = f"http://localhost:{port}" if port else ""
+
+        health_url = f"{base_url}/health" if base_url else ""
+        verify_urls: list[str] = []
+        if base_url and service == "payment-service" and action in _PAY_VERIFY_ACTIONS:
+            # These actions are only 'recovery' if the business endpoint works
+            # again (fallback engaged / DB reachable).
+            verify_urls.append(f"{base_url}/pay")
+
+        result = await verify_service_health(
+            self._docker,
+            service,
+            health_url=health_url,
+            verify_urls=verify_urls,
+        )
+
+        return ContractVerificationResult(
+            verified=result.verified,
+            checks_passed=result.checks_passed,
+            checks_total=result.checks_total,
+            message=result.message,
+            recovered_metrics=result.recovered_metrics,
+        )
