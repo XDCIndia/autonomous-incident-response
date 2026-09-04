@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from langgraph.graph.state import CompiledStateGraph
+
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import DockerController
 
 from backend.agents.base import (
     Arbiter,
@@ -86,6 +89,7 @@ class IncidentOrchestrator:
         verification: VerificationInterface | None = None,
         storage: Storage | None = None,
         event_bus: EventBus | None = None,
+        docker_ctl: Optional["DockerController"] = None,
     ):
         # Injected dependencies — default to the real LLM-backed agents when a
         # provider key is configured, otherwise the deterministic mocks (also
@@ -102,7 +106,7 @@ class IncidentOrchestrator:
         self.severity_agent = severity_agent or MockSeverityAgent()
         self.reporter = reporter or MockReporter()
         self.remediation_engine = remediation_engine or RemediationEngine()
-        self.verification = verification or VerificationInterface()
+        self.verification = verification or VerificationInterface(docker_ctl=docker_ctl)
         self.storage = storage or get_storage()
         self.event_bus = event_bus or get_event_bus()
 

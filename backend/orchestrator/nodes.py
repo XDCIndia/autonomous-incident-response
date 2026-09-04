@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import DockerController
 
 from backend.agents.base import (
     Arbiter,
@@ -43,18 +46,79 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Verification interface (no separate module exists yet)
+# Verification interface
 # ---------------------------------------------------------------------------
 
 class VerificationInterface:
     """Interface for verification — the orchestrator owns the boundary.
 
-    A mock implementation is provided here since no separate verification
-    module exists yet. Another developer can replace this later.
+    When a DockerController is available, verify() performs a real
+    multi-layer health check (container status + HTTP /health, plus an extra
+    endpoint probe for certain remediation actions) via
+    backend.simulator.health_checker.verify_service_health — the same
+    function backend/api/app.py's /remediation/execute endpoint already uses,
+    with the same service -> host-port mapping. Falls back to echoing
+    remediation_result.success (the original stub behavior) when no
+    controller is available — local dev without Docker, or tests — or if the
+    real check itself raises, so the pipeline never crashes at this stage.
     """
+
+    # Same service -> host-port mapping as backend/api/app.py's
+    # /remediation/execute endpoint (health_checker.py duplicates this too).
+    _HOST_PORT_MAP = {
+        "payment-service": "5001",
+        "rpc-service-primary": "5002",
+        "rpc-service-secondary": "5003",
+        "db-service": "5004",
+    }
+
+    def __init__(self, docker_ctl: Optional["DockerController"] = None):
+        self._docker = docker_ctl
 
     async def verify(self, incident: Incident) -> VerificationResult:
         """Verify that remediation was effective."""
+        if self._docker is None:
+            return self._stub_verify(incident)
+
+        target_service = (
+            incident.remediation_request.target_service
+            if incident.remediation_request
+            else incident.service_name
+        )
+        action = incident.remediation_request.action if incident.remediation_request else ""
+
+        port = self._HOST_PORT_MAP.get(target_service, "5000")
+        health_url = f"http://localhost:{port}/health"
+        verify_urls = []
+        if target_service == "payment-service" and action in (
+            "circuit_break",
+            "switch_to_secondary",
+            "reset_connection_pool",
+        ):
+            verify_urls.append(f"http://localhost:{port}/pay")
+
+        from backend.simulator.health_checker import verify_service_health
+
+        try:
+            result = await verify_service_health(
+                self._docker, target_service, health_url=health_url, verify_urls=verify_urls
+            )
+        except Exception as e:
+            logger.warning(
+                "Real verification failed for %s, falling back to stub: %s", target_service, e
+            )
+            return self._stub_verify(incident)
+
+        return VerificationResult(
+            verified=result.verified,
+            checks_passed=result.checks_passed,
+            checks_total=result.checks_total,
+            message=result.message,
+            recovered_metrics=result.recovered_metrics,
+            metadata=result.metadata,
+        )
+
+    def _stub_verify(self, incident: Incident) -> VerificationResult:
         success = incident.remediation_result.success if incident.remediation_result else False
         return VerificationResult(
             verified=success,

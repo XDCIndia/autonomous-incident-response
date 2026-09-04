@@ -30,10 +30,20 @@ def live_server(tmp_path_factory):
     env = {
         **os.environ,
         "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db",
-        # This suite tests real HTTP/concurrency behavior against the live
-        # server, not LLM quality or latency — blank any provider keys from
-        # the local `.env` (inherited via os.environ above) so the server
-        # process resolves incidents with the deterministic mock agents
+        # This suite tests real HTTP/concurrency behavior against synthetic
+        # service names (e.g. "load-svc-N") that don't correspond to actual
+        # containers — it doesn't stand up the docker-compose service stack.
+        # Point DOCKER_HOST at a socket that can't exist so DockerController's
+        # startup ping() fails and the app falls back to None, keeping the
+        # orchestrator's verification stage on its deterministic stub even
+        # when a real Docker daemon happens to be reachable on this machine
+        # (otherwise the incident pipeline's real health check correctly, but
+        # unhelpfully for this suite, reports these nonexistent services as
+        # unhealthy and the incidents never resolve).
+        "DOCKER_HOST": "unix:///nonexistent/docker.sock",
+        # Likewise blank any LLM provider keys from the local `.env` (this
+        # suite tests HTTP/concurrency, not LLM quality/latency) so the
+        # server resolves incidents with the deterministic mock agents
         # instead of making real, slow/network-dependent LLM API calls.
         "ANTHROPIC_API_KEY": "",
         "OPENAI_API_KEY": "",

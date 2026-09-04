@@ -56,7 +56,14 @@ async def lifespan(app: FastAPI):
         docker_ctl = await asyncio.to_thread(DockerController)
     except Exception as e:
         logger.warning("Could not initialize DockerController: %s", e)
-        
+
+    # Construct the orchestrator singleton now (rather than lazily on the
+    # first request) so its verification stage picks up the real
+    # DockerController — a lazy get_orchestrator() call from a later request
+    # would only ever see it as None, permanently falling back to the stub.
+    get_orchestrator(docker_ctl=docker_ctl)
+
+
     try:
         toxiproxy_ctl = await asyncio.to_thread(ToxiproxyClient)
         await asyncio.to_thread(toxiproxy_ctl.reset)
