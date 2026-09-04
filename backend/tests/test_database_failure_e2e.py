@@ -47,8 +47,19 @@ async def test_database_failure_e2e():
         assert proxy_name == "payment-db-proxy"
         
         print("Injected Database Failure successfully.")
-        
-        # 3. Execute Remediation (reset_connection_pool)
+
+        # 3. The fault must genuinely degrade the service BEFORE remediation:
+        #    /pay queries the DB through the toxiproxy'd connection, so while
+        #    the db timeout toxic is active it must NOT return 200.  (Issue #18
+        #    — this test previously only asserted API-level flags and could
+        #    pass with no real outage.)
+        pay_before = await client.get("http://localhost:5001/pay", timeout=10.0)
+        assert pay_before.status_code != 200, (
+            f"/pay returned {pay_before.status_code} after injection — "
+            "DB timeout toxic had no effect on the service"
+        )
+
+        # 4. Execute Remediation (reset_connection_pool)
         rem_resp = await client.post(
             f"{API_URL}/remediation/execute",
             json={
@@ -68,7 +79,7 @@ async def test_database_failure_e2e():
         assert result["success"] is True
         assert result["action"] == "reset_connection_pool"
         
-        # 4. Check Verification
+        # 5. Check Verification
         verification = rem_data.get("verification")
         assert verification is not None
         assert verification["verified"] is True
