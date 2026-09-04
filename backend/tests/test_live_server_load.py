@@ -71,9 +71,10 @@ class TestRealProcessHealthAndBasics:
         assert resp.json()["status"] == "ok"
 
     def test_trigger_and_resolve_over_real_http(self, live_server):
+        # Use resource_exhaustion (P3/P4 — no approval needed, auto-resolves)
         resp = httpx.post(
             f"{live_server}/incidents/trigger",
-            json={"service_name": "payment-service", "scenario": "bad_deployment"},
+            json={"service_name": "payment-service", "scenario": "resource_exhaustion"},
             timeout=5.0,
         )
         assert resp.status_code == 200
@@ -88,7 +89,7 @@ class TestRealProcessHealthAndBasics:
             pytest.fail("incident never resolved over real HTTP")
 
         data = check.json()
-        assert data["severity"] == "P1"
+        assert data["severity"] in ("P3", "P4")
         assert data["report"] is not None
 
     def test_malformed_json_body_returns_422_not_500(self, live_server):
@@ -128,7 +129,7 @@ class TestRealConcurrentLoad:
             for i in range(20):
                 resp = client.post(
                     f"{live_server}/incidents/trigger",
-                    json={"service_name": f"load-svc-{i}", "scenario": "bad_deployment"},
+                    json={"service_name": f"load-svc-{i}", "scenario": "resource_exhaustion"},
                 )
                 assert resp.status_code == 200
                 incident_ids.append(resp.json()["incident_id"])

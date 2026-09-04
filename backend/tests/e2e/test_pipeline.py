@@ -12,6 +12,7 @@ import asyncio
 import pytest
 from httpx import AsyncClient, ASGITransport
 
+import backend.orchestrator as orchestrator_module
 import backend.platform.storage as storage_module
 from backend.api.app import app
 from backend.platform.storage import Storage
@@ -32,6 +33,7 @@ async def reset_storage():
     yield
     await storage.close()
     storage_module._storage = None
+    orchestrator_module._orchestrator = None
 
 
 # Scenarios that produce P1/P2 severity (require approval)

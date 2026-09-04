@@ -9,6 +9,7 @@ import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import backend.orchestrator as orchestrator_module
 import backend.platform.storage as storage_module
 from backend.api.app import app
 from backend.platform.storage import Storage
@@ -22,6 +23,7 @@ async def reset_storage():
     yield
     await storage.close()
     storage_module._storage = None
+    orchestrator_module._orchestrator = None
 
 
 class TestKnowledgeBaseEndpoint:
@@ -94,15 +96,16 @@ class TestKnowledgeBaseEndpoint:
     async def test_search_reflects_newly_resolved_incidents(self):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # Use resource_exhaustion (P3/P4 — no approval needed, auto-resolves)
             trigger = await client.post(
                 "/incidents/trigger",
-                json={"service_name": "payment-service", "scenario": "bad_deployment"},
+                json={"service_name": "search-service", "scenario": "resource_exhaustion"},
             )
             incident_id = trigger.json()["incident_id"]
             await asyncio.sleep(2.0)
 
             response = await client.get(
-                "/knowledge-base/search", params={"query": "payment-service deployment rollback"}
+                "/knowledge-base/search", params={"query": "search-service resource exhaustion"}
             )
             results = response.json()["results"]
             assert any(r["incident_id"] == incident_id for r in results)
@@ -168,9 +171,10 @@ class TestWebSocketLiveTimeline:
         from starlette.testclient import TestClient
 
         with TestClient(app) as client:
+            # Use resource_exhaustion (P3/P4 — no approval needed, auto-resolves)
             trigger = client.post(
                 "/incidents/trigger",
-                json={"service_name": "payment-service", "scenario": "bad_deployment"},
+                json={"service_name": "search-service", "scenario": "resource_exhaustion"},
             )
             incident_id = trigger.json()["incident_id"]
 
@@ -194,9 +198,10 @@ class TestWebSocketLiveTimeline:
         from starlette.testclient import TestClient
 
         with TestClient(app) as client:
+            # Use resource_exhaustion (P3/P4 — no approval needed, auto-resolves)
             trigger = client.post(
                 "/incidents/trigger",
-                json={"service_name": "payment-service", "scenario": "bad_deployment"},
+                json={"service_name": "search-service", "scenario": "resource_exhaustion"},
             )
             incident_id = trigger.json()["incident_id"]
             # Let the pipeline finish BEFORE connecting — this is the "late
@@ -214,9 +219,10 @@ class TestWebSocketLiveTimeline:
         from starlette.testclient import TestClient
 
         with TestClient(app) as client:
+            # Use resource_exhaustion (P3/P4 — no approval needed, auto-resolves)
             trigger = client.post(
                 "/incidents/trigger",
-                json={"service_name": "payment-service", "scenario": "bad_deployment"},
+                json={"service_name": "search-service", "scenario": "resource_exhaustion"},
             )
             incident_id = trigger.json()["incident_id"]
             time.sleep(2.0)
@@ -250,9 +256,10 @@ class TestWebSocketLiveTimeline:
         from starlette.testclient import TestClient
 
         with TestClient(app) as client:
+            # Use resource_exhaustion (P3/P4 — no approval needed, auto-resolves)
             trigger = client.post(
                 "/incidents/trigger",
-                json={"service_name": "payment-service", "scenario": "bad_deployment"},
+                json={"service_name": "search-service", "scenario": "resource_exhaustion"},
             )
             incident_id = trigger.json()["incident_id"]
 
