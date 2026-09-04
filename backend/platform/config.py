@@ -49,6 +49,19 @@ class Settings(BaseSettings):
     #   off  -> always stay in mock mode
     real_env: str = "auto"
 
+    # Optional API key for the mutating endpoints that drive the real
+    # Docker/Toxiproxy environment (/faults/inject, /remediation/execute,
+    # /incidents/trigger, approve/reject).  When set, callers must send it in
+    # the `X-API-Key` header.  Empty (default) keeps auth disabled so local
+    # dev and the test suite are unaffected (issue #31).
+    api_key: str = ""
+
+    # Comma-separated list of allowed browser origins for CORS.  The API is
+    # cross-origin for the dashboard (frontend on :3000, API on :8000) but
+    # must NOT be wildcard: endpoints drive real infra, so arbitrary websites
+    # must not be able to call them from a browser (issue #31).
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
     # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
     # and isn't backend config — reject only unknown *backend* keys, not those.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
