@@ -614,10 +614,26 @@ class OrchestratorNodes:
             f"Incident report generated — root cause: {report.root_cause}",
         )
 
-        # Mark incident as resolved (or escalated if verification failed)
-        if incident.verification_result and not incident.verification_result.verified:
+        # The terminal state must reflect what actually happened. An incident
+        # is only RESOLVED when remediation ran and verification confirmed
+        # recovery. When a human rejected the remediation (or the approval
+        # wait timed out — treated as a rejection in wait_approval), nothing
+        # was executed and the fault may still be active: the incident must
+        # NOT claim recovery, so it ends in REJECTED instead.
+        if (
+            incident.verification_result is not None
+            and incident.verification_result.verified
+        ):
+            incident.state = IncidentState.RESOLVED
+        elif incident.verification_result is not None:
+            # Verification ran but recovery was not confirmed.
             incident.state = IncidentState.ESCALATED
+        elif state.get("approval_decision") == "rejected":
+            # Remediation declined (or approval timed out) — no recovery.
+            incident.state = IncidentState.REJECTED
         else:
+            # No remediation/verification ran (ASSIST / recommendation-only
+            # path) — the pipeline finished and produced its report.
             incident.state = IncidentState.RESOLVED
 
         await self.storage.save_incident(incident)

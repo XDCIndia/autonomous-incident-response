@@ -549,6 +549,9 @@ async def test_approval_rejected():
     # Remediation should NOT have been executed
     assert result.incident.remediation_result is None
     assert result.incident.report is not None
+    # The incident must NOT claim recovery — remediation was declined.
+    assert result.incident.state == IncidentState.REJECTED
+    assert result.incident.verification_result is None
 
 
 # ---------------------------------------------------------------------------
@@ -724,9 +727,11 @@ async def test_approval_timeout_rejects():
         result = await orchestrator.run_pipeline(incident)
 
     assert result.success is True
-    # Timeout treated as rejection — no remediation
+    # Timeout treated as rejection — no remediation, and no false recovery.
     assert result.incident.remediation_result is None
     assert result.incident.report is not None
+    assert result.incident.state == IncidentState.REJECTED
+    assert result.incident.verification_result is None
 
 
 @pytest.mark.asyncio
