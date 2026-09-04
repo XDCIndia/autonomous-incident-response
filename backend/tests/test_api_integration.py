@@ -25,6 +25,14 @@ async def reset_storage(monkeypatch):
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    # This file's TestWebSocketLiveTimeline tests use `with TestClient(app)
+    # as client:`, which — unlike the ASGITransport tests above — genuinely
+    # runs the app's lifespan(). Since #29 (issue #17), lifespan retries
+    # Toxiproxy readiness for up to 40s whenever REAL_ENV != "off" and
+    # Toxiproxy isn't reachable — which it never is in this test process.
+    # Force REAL_ENV=off so these tests keep booting instantly instead of
+    # blocking on that retry window every run.
+    monkeypatch.setenv("REAL_ENV", "off")
     config_module._settings = None
 
     storage = Storage(db_path=":memory:")
