@@ -1,210 +1,243 @@
-/* ------------------------------------------------------------------ *
- *  System Bachao — mock domain types (frontend demo data)
- * ------------------------------------------------------------------ */
+// Shared frontend types — mirror backend/contracts/models.py exactly.
+// This is the ONLY place backend-shaped types are defined; do not redeclare
+// partial versions of these interfaces in page components.
 
-export type Health = "healthy" | "degraded" | "down";
-export type NodeRole = "edge" | "service" | "data" | "external";
+export type SeverityLevel = "P1" | "P2" | "P3" | "P4";
 
-export interface GraphNode {
-  key: string;
-  /** display name, e.g. payment-service */
-  label: string;
-  role: NodeRole;
-  /** svg coordinates */
-  x: number;
-  y: number;
-  /** upstream services this node calls */
-  calls: string[];
-  /** one-liner for the inspector */
-  blurb: string;
+export type AutonomyLevel = "assist" | "semi" | "autonomous";
+
+export type IncidentState =
+  | "created"
+  | "detected"
+  | "investigating"
+  | "analyzing"
+  | "severity_determined"
+  | "remediating"
+  | "verifying"
+  | "resolved"
+  | "escalated"
+  | "rejected"
+  | "failed";
+
+export type PipelineStage =
+  | "detection"
+  | "investigation"
+  | "arbiter"
+  | "severity"
+  | "autonomy"
+  | "remediation"
+  | "verification"
+  | "report";
+
+export const PIPELINE_STAGE_ORDER: PipelineStage[] = [
+  "detection",
+  "investigation",
+  "arbiter",
+  "severity",
+  "autonomy",
+  "remediation",
+  "verification",
+  "report",
+];
+
+export interface TimelineEvent {
+  id: string;
+  timestamp: string;
+  stage: PipelineStage;
+  status: string; // "started" | "completed" | "failed"
+  message: string;
+  metadata: Record<string, unknown>;
 }
 
-export interface EdgeSpec {
-  from: string;
-  to: string;
-  /** dashed ring / external dependency */
-  external?: boolean;
-}
-
-export type PipelineStageKey =
-  | "detect"
-  | "triage"
-  | "investigate"
-  | "rca"
-  | "remediate"
-  | "verify";
-
-export type EnginePhase =
-  | "standby" // no incident
-  | "detect"
-  | "triage"
-  | "investigate"
-  | "rca"
-  | "awaiting_approval" // remediation proposal shown
-  | "executing" // remediation running
-  | "escalated" // human rejected, waiting for manual confirm
-  | "verify"
-  | "resolved";
-
-export type LogTone = "info" | "warn" | "crit" | "ok" | "system";
-
-export interface LogEntry {
-  id: number;
-  t: string; // clock label, e.g. 07:42:09
-  stage: string;
-  msg: string;
-  tone: LogTone;
-}
-
-export interface DetectSignal {
+export interface TelemetryEvent {
+  id: string;
+  timestamp: string;
   source: string;
-  metric: string;
-  value: string;
-  tone: "warn" | "crit";
-  note: string;
+  event_type: string;
+  value: unknown;
+  metadata: Record<string, unknown>;
 }
 
-export interface Finding {
-  agent: "LOG-INVESTIGATOR" | "METRIC-INVESTIGATOR" | "ARBITER";
-  headline: string;
-  detail: string;
+export interface LogInvestigationResult {
+  hypothesis: string;
   evidence: string[];
-  confidence: number; // 0..1 snapshot after this finding
+  confidence: number;
+  suggested_root_cause: string;
 }
 
-export interface VerifyCheck {
-  label: string;
-  detail: string;
-}
-
-export interface ReportMetric {
-  label: string;
-  before: string;
-  after: string;
-  ok?: boolean;
-}
-
-export interface GraphBeat {
-  when: PipelineStageKey;
-  /** health changes to apply */
-  set?: Record<string, Health>;
-  /** alert pulses to animate, pairs [from, to] */
-  pulses?: Array<[string, string]>;
-}
-
-export interface RcaInfo {
-  headline: string;
-  narrative: string;
+export interface MetricInvestigationResult {
+  hypothesis: string;
   evidence: string[];
-  confidencePct: number;
+  confidence: number;
+  suggested_root_cause: string;
+  metrics_summary: Record<string, unknown>;
 }
 
-export interface RemediationProposal {
+export interface ArbiterResult {
+  merged_hypothesis: string;
+  root_cause: string;
+  confidence: number;
+  log_hypothesis_agrees: boolean;
+  metric_hypothesis_agrees: boolean;
+  conflict_description: string | null;
+  evidence: string[];
+  contributing_factors: string[];
+  retry_count: number;
+}
+
+export interface SeverityResult {
+  severity: SeverityLevel;
+  blast_radius: number;
+  affected_services: string[];
+  justification: string;
+}
+
+export interface RemediationRequest {
   action: string;
-  target: string;
   description: string;
-  risk: "LOW" | "MEDIUM" | "HIGH";
-  rollbackInfo: string;
-  steps: string[];
-  requiresApproval: boolean;
+  target_service: string;
+  requires_approval: boolean;
 }
 
-export interface Scenario {
-  key: string;
-  label: string;
-  tagline: string;
-  chip: { text: string; dot: string }; // tailwind color tokens
-  featured?: boolean;
-  severity: "P1" | "P2";
-  autonomy: "AUTONOMOUS" | "SEMI-AUTONOMOUS" | "ASSIST";
-  /** which node first goes down */
-  failedNode: string;
-  /** node the RCA points at */
-  rcNode: string;
-  headline: string;
-  triageSummary: string;
-  detectSummary: string;
-  detectSignals: DetectSignal[];
-  spread: GraphBeat[];
-  findings: Finding[];
-  rca: RcaInfo;
-  remediation: RemediationProposal;
-  verifyChecks: VerifyCheck[];
-  report: {
-    rootCause: string;
-    impact: string;
-    actionTaken: string;
-    prevention: string[];
-    metrics: ReportMetric[];
-  };
+export interface RemediationResult {
+  action: string;
+  success: boolean;
+  message: string;
+  before_state: Record<string, unknown>;
+  after_state: Record<string, unknown>;
 }
 
+export interface VerificationResult {
+  verified: boolean;
+  checks_passed: number;
+  checks_total: number;
+  message: string;
+  recovered_metrics: Record<string, unknown>;
+}
+
+export interface IncidentReport {
+  root_cause: string;
+  impact: string;
+  remediation_action: string;
+  confidence: number;
+  prevention: string;
+  result_metrics: Record<string, { before: unknown; after: unknown }>;
+  timeline_summary: string[];
+}
+
+/** Shape returned by GET /incidents (list endpoint) */
 export interface IncidentSummary {
   id: string;
-  scenarioKey: string;
-  severity: string;
-  autonomy: string;
-  serviceName: string;
-  headline: string;
-  startedAt: string; // ISO
-  resolvedAt?: string; // ISO
-  durationSec?: number;
-  status: "open" | "resolved";
+  service_name: string;
+  state: IncidentState;
+  severity: SeverityLevel | null;
+  current_stage: PipelineStage | null;
+  created_at: string;
 }
 
-/** What the engine hands the rest of the app while running */
-export interface SimulationState {
-  phase: EnginePhase;
-  incident: IncidentSummary | null;
-  stageIdx: number; // pipeline step currently active (-1 idle)
-  stagesDone: boolean[];
-  nodeHealth: Record<string, Health>;
-  /** pairs currently emitting alert pulses */
-  pulses: Array<[string, string]>;
-  rcNode: string | null;
-  rcShown: boolean;
-  rca: RcaInfo | null;
-  signals: DetectSignal[];
-  signalsShown: number;
-  findings: Finding[];
-  findingsShown: number;
-  log: LogEntry[];
-  confidence: number | null;
-  proposal: RemediationProposal | null;
-  proposalStatus: "pending" | "approved" | "rejected" | "executing" | "done";
-  approvalCountdown: number;
-  checks: VerifyCheck[];
-  checksShown: number;
-  report: PostMortemReport | null;
-  elapsedMs: number;
-  error?: string | null;
-}
-
-export interface PostMortemTimelineItem {
-  t: string;
-  stage: string;
-  msg: string;
-  tone: LogTone;
-}
-
-export interface PostMortemReport {
+/** Full shape returned by GET /incidents/{id} */
+export interface Incident {
   id: string;
-  scenarioKey: string;
-  severity: string;
-  autonomy: string;
-  serviceName: string;
-  headline: string;
-  startedAt: string;
-  resolvedAt: string;
-  durationSec: number;
-  rootCauseNode: string;
-  rootCause: string;
-  impact: string;
-  actionTaken: string;
-  risk: string;
-  confidencePct: number;
-  prevention: string[];
-  metrics: ReportMetric[];
-  checks: VerifyCheck[];
-  timeline: PostMortemTimelineItem[];
+  created_at: string;
+  updated_at: string;
+  target_url: string | null;
+  service_name: string;
+  service_url: string | null;
+  state: IncidentState;
+  severity: SeverityLevel | null;
+  autonomy_level: AutonomyLevel | null;
+  current_stage: PipelineStage | null;
+  signals: TelemetryEvent[];
+  log_result: LogInvestigationResult | null;
+  metric_result: MetricInvestigationResult | null;
+  arbiter_result: ArbiterResult | null;
+  severity_result: SeverityResult | null;
+  remediation_request: RemediationRequest | null;
+  remediation_result: RemediationResult | null;
+  verification_result: VerificationResult | null;
+  report: IncidentReport | null;
+  timeline: TimelineEvent[];
 }
+
+export interface TriggerResponse {
+  incident_id: string;
+  status: string;
+  message: string;
+}
+
+export interface ApprovalStatus {
+  incident_id: string;
+  has_pending_approval: boolean;
+}
+
+export interface ApprovalResponse {
+  incident_id: string;
+  status: string;
+  message: string;
+}
+
+export interface KnowledgeBaseResult {
+  id: number;
+  incident_id: string | null;
+  service: string;
+  root_cause: string;
+  description: string;
+  resolved_via: string;
+  created_at: string;
+  similarity: number;
+}
+
+/** Shape returned by GET /services/health — DockerController.check_health() */
+export interface ServiceHealth {
+  service: string;
+  running: boolean;
+  health: string; // "healthy" | "unhealthy" | "starting" | "not_found" | "none" | "unknown"
+  version: string;
+  container_id?: string;
+  image?: string;
+}
+
+/**
+ * Trigger scenarios supported by POST /incidents/trigger
+ * (backend/api/app.py TriggerRequest docstring: bad_deployment | database_failure
+ * | dependency_outage | resource_exhaustion). `service` is the default target
+ * matching backend/simulator/scenarios.py's own function defaults — all three
+ * real-environment scenarios default to "payment-service" (the container real
+ * remediation acts on); resource_exhaustion has no real backend target yet
+ * and stays a placeholder name.
+ */
+export const SCENARIOS: { id: string; label: string; service: string; description: string }[] = [
+  {
+    id: "bad_deployment",
+    label: "Bad Deployment",
+    service: "payment-service",
+    description: "New version causes errors and a latency spike",
+  },
+  {
+    id: "database_failure",
+    label: "Database Failure",
+    service: "payment-service",
+    description: "Connection pool exhaustion, queries time out",
+  },
+  {
+    id: "dependency_outage",
+    label: "Dependency Outage",
+    service: "payment-service",
+    description: "An external dependency stops responding",
+  },
+  {
+    id: "resource_exhaustion",
+    label: "Resource Exhaustion",
+    service: "order-service",
+    description: "CPU/memory leak causes gradual degradation",
+  },
+];
+
+// Real services from docker-compose.yml — used for the health grid.
+// (toxiproxy is infra, not an application service, so it's excluded here.)
+export const KNOWN_SERVICES = [
+  "payment-service",
+  "rpc-service-primary",
+  "rpc-service-secondary",
+  "db-service",
+] as const;
