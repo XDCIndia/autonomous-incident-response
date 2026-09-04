@@ -32,6 +32,17 @@ interface Incident {
   } | null;
 }
 
+interface SimilarIncident {
+  id: number;
+  incident_id: string | null;
+  service: string;
+  root_cause: string;
+  description: string;
+  resolved_via: string;
+  created_at: string;
+  similarity: number;
+}
+
 export default function IncidentPage() {
   const params = useParams();
   const id = params.id as string;
@@ -39,6 +50,8 @@ export default function IncidentPage() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [connected, setConnected] = useState(false);
+  const [similarIncidents, setSimilarIncidents] = useState<SimilarIncident[] | null>(null);
+  const [similarLoading, setSimilarLoading] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   // Fetch incident details
@@ -83,6 +96,24 @@ export default function IncidentPage() {
 
     return () => ws.close();
   }, [id]);
+
+  // Once the report lands (root cause is final), look up similar past
+  // incidents from the knowledge base — keyed on service+root_cause rather
+  // than the whole `incident` object so it doesn't re-fetch on every
+  // WebSocket-triggered refresh once the report itself hasn't changed.
+  const reportRootCause = incident?.report?.root_cause;
+  useEffect(() => {
+    if (!incident || !reportRootCause) return;
+
+    setSimilarLoading(true);
+    const query = `${incident.service_name} ${reportRootCause}`;
+    fetch(`${API_URL}/knowledge-base/search?query=${encodeURIComponent(query)}&top_k=3`)
+      .then((res) => res.json())
+      .then((data) => setSimilarIncidents(data.results ?? []))
+      .catch(console.error)
+      .finally(() => setSimilarLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incident?.service_name, reportRootCause]);
 
   if (!incident) {
     return <p>Loading incident...</p>;
@@ -165,6 +196,40 @@ export default function IncidentPage() {
             <dt style={{ fontWeight: "bold" }}>Prevention</dt>
             <dd>{incident.report.prevention}</dd>
           </dl>
+        </div>
+      )}
+
+      {incident.report && (
+        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px", marginTop: "24px" }}>
+          <h3 style={{ margin: "0 0 12px" }}>Similar Past Incidents</h3>
+          {similarLoading ? (
+            <p style={{ color: "#666" }}>Searching knowledge base...</p>
+          ) : !similarIncidents || similarIncidents.length === 0 ? (
+            <p style={{ color: "#666" }}>No similar past incidents found.</p>
+          ) : (
+            similarIncidents.map((match) => (
+              <div
+                key={match.id}
+                style={{
+                  padding: "10px 12px",
+                  marginBottom: "8px",
+                  background: "#f8f9fa",
+                  border: "1px solid #eee",
+                  borderRadius: "6px",
+                  fontSize: "13px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                  <strong>
+                    {match.service} — {match.root_cause}
+                  </strong>
+                  <span style={{ color: "#666" }}>{(match.similarity * 100).toFixed(0)}% match</span>
+                </div>
+                <p style={{ margin: "0 0 4px" }}>{match.description}</p>
+                <small style={{ color: "#666" }}>Resolved via: {match.resolved_via}</small>
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>
