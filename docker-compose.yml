@@ -53,6 +53,7 @@ services:
       - FORCE_UNHEALTHY=false
       - PORT=5000
       - RPC_URL=http://toxiproxy:8080/process
+      - DB_URL=http://toxiproxy:8081/query
     labels:
       iras.service: "payment-service"
       iras.version: "v2.4.0"
@@ -97,6 +98,21 @@ services:
       iras.managed: "true"
     networks:
       - iras-net
+      
+  db-service:
+    build:
+      context: ./services/db-service
+      dockerfile: Dockerfile
+    container_name: iras-db-service
+    ports:
+      - "5004:5000"
+    environment:
+      - PORT=5000
+    labels:
+      iras.service: "db-service"
+      iras.managed: "true"
+    networks:
+      - iras-net
 
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.9.0
@@ -104,6 +120,7 @@ services:
     ports:
       - "8474:8474" # Toxiproxy API
       - "8080:8080" # payment-rpc-proxy
+      - "8081:8081" # payment-db-proxy
     networks:
       - iras-net
     labels:

@@ -23,6 +23,7 @@ app = Flask(__name__)
 VERSION = os.environ.get("SERVICE_VERSION", "v2.4.0")
 FORCE_UNHEALTHY = os.environ.get("FORCE_UNHEALTHY", "false").lower() == "true"
 RPC_URL = os.environ.get("RPC_URL", None)
+DB_URL = os.environ.get("DB_URL", None)
 
 
 @app.route("/health")
@@ -50,6 +51,21 @@ def pay():
     # Healthy response with normal latency
     start_time = time.time()
     
+    # DB Integration
+    db_data = None
+    if DB_URL:
+        try:
+            req = urllib.request.Request(DB_URL)
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                if response.status == 200:
+                    db_data = json.loads(response.read().decode())
+                else:
+                    return jsonify({"error": "db_failed", "status_code": response.status}), 500
+        except urllib.error.URLError as e:
+            return jsonify({"error": "db_timeout_or_unreachable", "details": str(e)}), 500
+        except Exception as e:
+            return jsonify({"error": "db_error", "details": str(e)}), 500
+            
     # RPC Integration
     rpc_data = None
     if RPC_URL:
@@ -80,7 +96,8 @@ def pay():
         "result": "ok",
         "version": VERSION,
         "latency_ms": round(latency_ms, 1),
-        "rpc_data": rpc_data
+        "rpc_data": rpc_data,
+        "db_data": db_data
     }), 200
 
 

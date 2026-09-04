@@ -47,12 +47,14 @@ class FaultInjectionResult:
         previous_config: dict[str, Any] | None = None,
         bad_version: str = "",
         service: str = "",
+        metadata: dict[str, Any] | None = None,
     ):
         self.signals = signals
         self.docker_performed = docker_performed
         self.previous_config = previous_config
         self.bad_version = bad_version
         self.service = service
+        self.metadata = metadata or {}
 
 
 # ---------------------------------------------------------------------------
@@ -171,21 +173,57 @@ def inject_bad_deployment(
 
 
 def inject_database_failure(
-    service: str = "inventory-service",
-) -> list[TelemetryEvent]:
+    service: str = "payment-service",
+    database: str = "postgres-main",
+    toxiproxy_client: ToxiproxyClient | None = None,
+) -> FaultInjectionResult:
     """Simulate database connection pool exhaustion.
 
     Returns signals showing connection timeouts and pool exhaustion.
     """
     now = datetime.now(timezone.utc)
-    return [
+    
+    docker_performed = False
+    metadata = {}
+    
+    if toxiproxy_client:
+        proxy_name = "payment-db-proxy"
+        # Inject timeout toxic
+        toxic = toxiproxy_client.add_toxic(
+            proxy_name=proxy_name,
+            toxic_name="db_timeout",
+            toxic_type="timeout",
+            attributes={"timeout": 30000}
+        )
+        if toxic:
+            docker_performed = True
+            metadata = {
+                "proxy_name": proxy_name,
+                "database": database,
+                "toxic_name": "db_timeout",
+                "toxic_type": "timeout",
+            }
+            logger.info("Injected database failure on %s", proxy_name)
+    
+    signals = [
+        TelemetryEvent(
+            timestamp=now,
+            source=database,
+            event_type="active_connections",
+            value=100.0,  # e.g., 100% of pool size
+            metadata={
+                "log_message": "WARNING: Connection pool exhausted, refusing new connections",
+                "root_cause_hint": "database_failure",
+                **metadata
+            },
+        ),
         TelemetryEvent(
             timestamp=now,
             source=service,
             event_type="error_rate",
-            value=0.60,
+            value=0.55,
             metadata={
-                "log_message": f"Database connection pool exhausted on {service}",
+                "log_message": f"FATAL: Database connection timeout connecting to {database}",
                 "root_cause_hint": "database_failure",
             },
         ),
@@ -210,6 +248,13 @@ def inject_database_failure(
             },
         ),
     ]
+    
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        service=service,
+        metadata=metadata,
+    )
 
 
 def inject_dependency_outage(
@@ -286,6 +331,7 @@ def inject_dependency_outage(
         signals=signals,
         docker_performed=docker_performed,
         service=service,
+        metadata=metadata,
     )
 
 

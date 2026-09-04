@@ -14,11 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.contracts import Incident, IncidentState, TelemetryEvent, RemediationRequest
 from backend.orchestrator import IncidentOrchestrator, get_orchestrator
@@ -46,7 +46,7 @@ toxiproxy_ctl: Optional[ToxiproxyClient] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown."""
-    global docker_ctl
+    global docker_ctl, toxiproxy_ctl
     settings = get_settings()
     storage = get_storage()
     await storage.init_db()
@@ -65,6 +65,12 @@ async def lifespan(app: FastAPI):
             name="payment-rpc-proxy",
             listen="0.0.0.0:8080",
             upstream="rpc-service-primary:5000"
+        )
+        # Pre-create the proxy for the database failure scenario
+        toxiproxy_ctl.create_proxy(
+            name="payment-db-proxy",
+            listen="0.0.0.0:8081",
+            upstream="db-service:5000"
         )
     except Exception as e:
         logger.warning("Could not initialize ToxiproxyClient: %s", e)
@@ -111,17 +117,17 @@ class TriggerResponse(BaseModel):
 
 
 class ApprovalResponse(BaseModel):
-    """Response after approving/rejecting an incident."""
+    """Response for approval actions."""
     incident_id: str
     status: str
     message: str
 
 
 class FaultInjectionRequest(BaseModel):
-    """Request to inject a specific fault via the simulator."""
+    """Request to inject a fault via API."""
     scenario: str
-    service_name: str = "payment-service"
-    parameters: dict = {}
+    service_name: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +156,7 @@ async def inject_fault(request: FaultInjectionRequest):
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
         
-    from backend.simulator import inject_bad_deployment, inject_dependency_outage
+    from backend.simulator import inject_bad_deployment, inject_dependency_outage, inject_database_failure
     
     if request.scenario == "bad_deployment":
         result = inject_bad_deployment(
@@ -171,6 +177,20 @@ async def inject_fault(request: FaultInjectionRequest):
         if toxiproxy_ctl is None:
             raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
         result = inject_dependency_outage(
+            service=request.service_name,
+            toxiproxy_client=toxiproxy_ctl,
+            **request.parameters
+        )
+        return {
+            "status": "success",
+            "message": f"Injected {request.scenario} on {request.service_name}",
+            "docker_performed": result.docker_performed,
+            "metadata": result.metadata
+        }
+    elif request.scenario == "database_failure":
+        if toxiproxy_ctl is None:
+            raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+        result = inject_database_failure(
             service=request.service_name,
             toxiproxy_client=toxiproxy_ctl,
             **request.parameters
@@ -209,7 +229,7 @@ async def execute_remediation(request: RemediationRequest):
         health_url = f"http://{request.target_service}:5000/health"
         
         verify_urls = []
-        if request.target_service == "payment-service" and request.action in ("circuit_break", "switch_to_secondary"):
+        if request.target_service == "payment-service" and request.action in ("circuit_break", "switch_to_secondary", "reset_connection_pool"):
             verify_urls.append(f"http://{request.target_service}:5000/pay")
         
         verification = await verify_service_health(
@@ -262,8 +282,16 @@ async def trigger_incident(request: TriggerRequest):
                    f"Available: {list(scenario_map.keys())}",
         )
 
-    signals = injector()
-    incident.signals = signals
+    result = injector()
+    
+    # Extract signals and metadata if the injector returned a FaultInjectionResult
+    if hasattr(result, "signals"):
+        incident.signals = result.signals
+        # We can also add initial metadata to the incident if desired
+        if hasattr(result, "metadata") and result.metadata:
+            incident.metadata.update(result.metadata)
+    else:
+        incident.signals = result
 
     # Save initial state
     storage = get_storage()

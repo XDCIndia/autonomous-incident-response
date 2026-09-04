@@ -108,6 +108,10 @@ class RemediationEngine:
         # ── Real Toxiproxy Switch to Secondary ──────────────────────────
         if action == "switch_to_secondary" and self._toxiproxy is not None:
             return await self._real_switch_to_secondary(request)
+            
+        # ── Real Reset Connection Pool ──────────────────────────────────
+        if action == "reset_connection_pool" and self._docker is not None and self._toxiproxy is not None:
+            return await self._real_reset_connection_pool(request)
 
         # ── Mock fallback for all other actions ─────────────────────────
         return await self._mock_execute(request)
@@ -309,6 +313,46 @@ class RemediationEngine:
 
         return RemediationResult(
             action="switch_to_secondary",
+            success=success,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_reset_connection_pool(self, request: RemediationRequest) -> RemediationResult:
+        """Reset the connection pool by removing toxics and restarting the service."""
+        service = request.target_service
+        proxy_name = request.parameters.get("proxy_name", "payment-db-proxy")
+        toxic_name = request.parameters.get("toxic_name", "db_timeout")
+        
+        before_health = self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+            "proxy": proxy_name,
+            "toxic_removed": False
+        }
+        
+        # Remove the toxic that's causing the DB failure
+        removed = self._toxiproxy.remove_toxic(proxy_name, toxic_name)
+        
+        # Restart the payment service to flush its connection pool
+        success = self._docker.restart_container(service)
+        if success:
+            self._docker.wait_for_health(service, retries=10, delay=2.0)
+            
+        after_health = self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+            "proxy": proxy_name,
+            "toxic_removed": removed
+        }
+        
+        message = f"Removed toxic {toxic_name} and restarted {service} to reset connection pool" if success else f"Failed to restart {service} to reset connection pool"
+        
+        return RemediationResult(
+            action="reset_connection_pool",
             success=success,
             message=message,
             before_state=before_state,
