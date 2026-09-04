@@ -38,6 +38,7 @@ packages = ["backend"]
 asyncio_mode = "auto"
 testpaths = ["backend/tests"]
 addopts = "--tb=short"
+markers = ["e2e: end-to-end tests"]
 
 [tool.ruff]
 line-length = 100
