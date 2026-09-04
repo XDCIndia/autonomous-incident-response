@@ -352,10 +352,11 @@ class DockerController:
             "duration_seconds": duration_seconds,
         }
 
-    def _sync_restore_resources(self, service_name: str, previous: dict[str, Any]) -> bool:
+    def _sync_restore_resources(self, service_name: str, previous: dict[str, Any] | None = None) -> bool:
         container = self._sync_get_service_container(service_name)
         if container is None:
             return False
+        previous = previous or {}
         with self._lock:
             try:
                 container.update(
@@ -451,7 +452,16 @@ class DockerController:
             self._sync_exhaust_resources, service_name, cpu_quota_pct, workers, duration_seconds
         )
 
-    async def restore_resources(self, service_name: str, previous: dict[str, Any]) -> bool:
+    async def restore_resources(self, service_name: str, previous: dict[str, Any] | None = None) -> bool:
+        """Lift a container's CPU quota constraint.
+
+        With ``previous`` (the dict ``exhaust_resources``'s auto-revert timer
+        captures internally), restores the exact prior quota/period. Without
+        it — e.g. called directly as a remediation action, which has no
+        access to that injection-time state — defaults to "unlimited",
+        which is also the correct value for this demo's own
+        docker-compose.yml: none of its services set an explicit CPU limit.
+        """
         return await asyncio.to_thread(self._sync_restore_resources, service_name, previous)
 
     async def wait_for_health(
