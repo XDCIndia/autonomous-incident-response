@@ -6,6 +6,7 @@ import { formatDuration } from "@/lib/incidents";
 import { SystemGraph } from "./SystemGraph";
 import { Button, Chip, MicroLabel, Panel } from "./ui";
 import { IconCheck } from "./icons";
+import type { ApiEnrichment } from "@/app/incidents/[id]/page";
 
 function isoTime(iso: string): string {
   const d = new Date(iso);
@@ -14,7 +15,13 @@ function isoTime(iso: string): string {
     .join(":");
 }
 
-export function PostMortem({ report }: { report: PostMortemReport }) {
+export function PostMortem({
+  report,
+  enrichment,
+}: {
+  report: PostMortemReport;
+  enrichment?: ApiEnrichment;
+}) {
   const rcNode = nodeMap[report.rootCauseNode];
   const states: Record<string, Health> = Object.fromEntries(
     Object.keys(nodeMap).map((k) => [k, "healthy"])
@@ -197,6 +204,166 @@ export function PostMortem({ report }: { report: PostMortemReport }) {
           ))}
         </div>
       </Panel>
+
+      {/* ── upstream: live API timeline (when backend is connected) ── */}
+      {enrichment && enrichment.timeline.length > 0 && (
+        <Panel
+          title="Live timeline"
+          right={
+            <span className="flex items-center gap-1.5">
+              <span className={`h-1.5 w-1.5 rounded-full ${enrichment.connected ? "bg-[var(--color-status-healthy)]" : "bg-[var(--color-text-muted)]"}`} />
+              <span className="label-micro text-[var(--color-text-muted)]">
+                {enrichment.connected ? "CONNECTED" : "DISCONNECTED"}
+              </span>
+            </span>
+          }
+        >
+          <div className="max-h-[300px] overflow-y-auto space-y-1">
+            {enrichment.timeline.map((event) => (
+              <div
+                key={event.id}
+                className={`flex items-start gap-3 rounded px-2 py-1.5 text-[12px] ${
+                  event.status === "failed"
+                    ? "bg-[rgba(255,77,103,0.06)] text-[var(--color-accent-red)]"
+                    : event.status === "started"
+                      ? "bg-[rgba(245,184,75,0.05)] text-[var(--color-accent-amber)]"
+                      : "text-[var(--color-text-secondary)]"
+                }`}
+              >
+                <span className="shrink-0 font-mono text-[10px] text-[var(--color-text-faint)]">
+                  {new Date(event.timestamp).toLocaleTimeString()}
+                </span>
+                <span className="shrink-0 font-mono text-[10px] tracking-[0.08em] opacity-70">
+                  {event.stage}
+                </span>
+                <span className="leading-snug">{event.message}</span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
+
+      {/* ── upstream: investigation results (when backend provides them) ── */}
+      {enrichment?.incident && (enrichment.incident.log_result || enrichment.incident.metric_result) && (
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          {enrichment.incident.log_result && (
+            <Panel title="Log investigator">
+              <div className="space-y-2 text-[12px]">
+                <div>
+                  <span className="label-micro">Hypothesis</span>
+                  <p className="mt-1 text-[var(--color-text-primary)]">{enrichment.incident.log_result.hypothesis}</p>
+                </div>
+                <div>
+                  <span className="label-micro">Suggested root cause</span>
+                  <p className="mt-1 text-[var(--color-text-primary)]">{enrichment.incident.log_result.suggested_root_cause}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="label-micro">Confidence</span>
+                  <span className="font-mono text-[12px] text-[var(--color-accent-cyan)]">
+                    {(enrichment.incident.log_result.confidence * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+            </Panel>
+          )}
+          {enrichment.incident.metric_result && (
+            <Panel title="Metric investigator">
+              <div className="space-y-2 text-[12px]">
+                <div>
+                  <span className="label-micro">Hypothesis</span>
+                  <p className="mt-1 text-[var(--color-text-primary)]">{enrichment.incident.metric_result.hypothesis}</p>
+                </div>
+                <div>
+                  <span className="label-micro">Suggested root cause</span>
+                  <p className="mt-1 text-[var(--color-text-primary)]">{enrichment.incident.metric_result.suggested_root_cause}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="label-micro">Confidence</span>
+                  <span className="font-mono text-[12px] text-[var(--color-accent-cyan)]">
+                    {(enrichment.incident.metric_result.confidence * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+            </Panel>
+          )}
+        </div>
+      )}
+
+      {/* ── upstream: arbiter result ── */}
+      {enrichment?.incident?.arbiter_result && (
+        <Panel title="Arbiter" className="mt-4">
+          <div className="space-y-3 text-[12px]">
+            {enrichment.incident.arbiter_result.conflict_description && (
+              <div className="rounded-md border border-[rgba(245,184,75,0.25)] bg-[rgba(245,184,75,0.06)] px-3 py-2 text-[var(--color-accent-amber)]">
+                <strong>Conflict:</strong> {enrichment.incident.arbiter_result.conflict_description}
+              </div>
+            )}
+            <div>
+              <span className="label-micro">Merged hypothesis</span>
+              <p className="mt-1 text-[var(--color-text-primary)]">{enrichment.incident.arbiter_result.merged_hypothesis}</p>
+            </div>
+            <div>
+              <span className="label-micro">Root cause</span>
+              <p className="mt-1 text-[var(--color-text-primary)]">{enrichment.incident.arbiter_result.root_cause}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="label-micro">Confidence</span>
+              <span className="font-mono text-[12px] text-[var(--color-accent-cyan)]">
+                {(enrichment.incident.arbiter_result.confidence * 100).toFixed(0)}%
+              </span>
+            </div>
+            {enrichment.incident.arbiter_result.contributing_factors.length > 0 && (
+              <div>
+                <span className="label-micro">Contributing factors</span>
+                <p className="mt-1 text-[var(--color-text-secondary)]">
+                  {enrichment.incident.arbiter_result.contributing_factors.join(", ")}
+                </p>
+              </div>
+            )}
+          </div>
+        </Panel>
+      )}
+
+      {/* ── upstream: similar past incidents ── */}
+      {enrichment?.incident?.report && (
+        <Panel
+          title="Similar past incidents"
+          className="mt-4"
+          right={
+            enrichment.similarLoading ? (
+              <span className="label-micro text-[var(--color-text-muted)]">SEARCHING…</span>
+            ) : undefined
+          }
+        >
+          {enrichment.similarLoading ? (
+            <p className="text-[12px] text-[var(--color-text-muted)]">Searching knowledge base…</p>
+          ) : !enrichment.similarIncidents || enrichment.similarIncidents.length === 0 ? (
+            <p className="text-[12px] text-[var(--color-text-muted)]">No similar past incidents found.</p>
+          ) : (
+            <div className="space-y-2">
+              {enrichment.similarIncidents.map((match) => (
+                <div
+                  key={match.id}
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-hover)] px-3 py-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] font-medium text-[var(--color-text-primary)]">
+                      {match.service} — {match.root_cause}
+                    </span>
+                    <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+                      {(match.similarity * 100).toFixed(0)}% match
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">{match.description}</p>
+                  <p className="mt-0.5 font-mono text-[10px] text-[var(--color-text-faint)]">
+                    Resolved via: {match.resolved_via}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+      )}
 
       <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border-subtle)] pt-4">
         <span className="label-micro text-[var(--color-text-faint)]">

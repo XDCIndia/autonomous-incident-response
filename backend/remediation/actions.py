@@ -3,17 +3,31 @@
 Safety invariant: LLM can ONLY select from this action set.
 No arbitrary shell commands. No arbitrary code execution.
 
-Person 3 implements real remediation logic here.
-For the foundation, actions modify mock simulator state.
+Real Docker remediation:
+    When a ``DockerController`` is available, ``rollback_deploy`` performs
+    actual container replacement using the saved container configuration.
+    ``scale_up`` lifts the CPU quota constraint ``inject_resource_
+    exhaustion`` applies (see backend/simulator/scenarios.py) — this stack
+    has no load balancer, so running additional replicas wouldn't receive
+    any traffic; relieving the actual constraint is what's meaningful here.
+
+Mock mode (no controller):
+    Falls back to the original in-memory state mutation.
 """
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend.contracts import RemediationRequest, RemediationResult, SeverityLevel
+
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import DockerController
+    from backend.simulator.toxiproxy_client import ToxiproxyClient
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +64,14 @@ SEVERITY_AUTONOMY_MAP: dict[SeverityLevel, bool] = {
 class RemediationEngine:
     """Executes remediation actions from the fixed allowed set.
 
-    Mock implementation: modifies internal state to simulate remediation.
+    When ``docker_controller`` is provided, actions that support real
+    Docker operations will use it.  Otherwise, falls back to mock
+    in-memory state mutation for backward compatibility.
     """
 
-    def __init__(self):
+    def __init__(self, docker_controller: DockerController | None = None, toxiproxy_client: ToxiproxyClient | None = None):
+        self._docker = docker_controller
+        self._toxiproxy = toxiproxy_client
         self._simulated_state: dict[str, Any] = {
             "current_version": "v2.4.1",
             "db_connections_used": 100,
@@ -74,9 +92,328 @@ class RemediationEngine:
     async def execute(self, request: RemediationRequest) -> RemediationResult:
         """Execute a remediation action.
 
-        This is a MOCK implementation. Actions modify simulated state.
-        Person 3 implements real execution here.
+        Dispatches to real Docker operations when a controller is
+        available and the action supports it.  Falls back to mock
+        state mutation otherwise.
         """
+        action = request.action
+
+        # ── Real Docker rollback ────────────────────────────────────────
+        # NOTE: Docker SDK is synchronous — all real operations run in a
+        # thread to avoid blocking the async event loop.
+        if action == "rollback_deploy" and self._docker is not None:
+            return await self._real_rollback(request)
+
+        # ── Real Docker restart ─────────────────────────────────────────
+        if action == "restart_service" and self._docker is not None:
+            return await self._real_restart(request)
+
+        # ── Real Toxiproxy Circuit Break ────────────────────────────────
+        if action == "circuit_break" and self._toxiproxy is not None:
+            return await self._real_circuit_break(request)
+
+        # ── Real Toxiproxy Switch to Secondary ──────────────────────────
+        if action == "switch_to_secondary" and self._toxiproxy is not None:
+            return await self._real_switch_to_secondary(request)
+
+        # ── Real Reset Connection Pool ──────────────────────────────────
+        if action == "reset_connection_pool" and self._docker is not None and self._toxiproxy is not None:
+            return await self._real_reset_connection_pool(request)
+
+        # ── Real Scale Up (lift the CPU quota constraint) ───────────────
+        if action == "scale_up" and self._docker is not None:
+            return await self._real_scale_up(request)
+
+        # ── Mock fallback for all other actions ─────────────────────────
+        return await self._mock_execute(request)
+
+    async def _real_rollback(self, request: RemediationRequest) -> RemediationResult:
+        """Rollback a bad deployment using real Docker operations.
+
+        Expects ``request.parameters`` to contain ``previous_config`` —
+        the full container configuration saved during fault injection.
+        """
+        from backend.simulator.docker_controller import ContainerConfig
+
+        service = request.target_service
+        params = request.parameters
+
+        # Capture before-state
+        before_health = await self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+            "version": before_health.get("version", "unknown"),
+            "image": before_health.get("image", "unknown"),
+        }
+
+        # Extract the saved configuration
+        prev_config_dict = params.get("previous_config")
+        if not prev_config_dict:
+            return RemediationResult(
+                action="rollback_deploy",
+                success=False,
+                message=f"No previous_config provided for {service} — cannot rollback",
+                before_state=before_state,
+                after_state=before_state,
+            )
+
+        try:
+            # Reconstruct the ContainerConfig from the serialized dict
+            prev_config = ContainerConfig(**prev_config_dict)
+        except Exception as exc:
+            return RemediationResult(
+                action="rollback_deploy",
+                success=False,
+                message=f"Invalid previous_config: {exc}",
+                before_state=before_state,
+                after_state=before_state,
+            )
+
+        # Step 1: Remove the bad container
+        logger.info("Rollback: removing bad deployment for %s", service)
+        await self._docker.remove_container(service, force=True)
+
+        # Step 2: Deploy the previous known-good version
+        logger.info(
+            "Rollback: restoring %s to image=%s version=%s",
+            service, prev_config.image, prev_config.version,
+        )
+        # Remove FORCE_UNHEALTHY from the restored environment
+        restored_env_overrides = {
+            "FORCE_UNHEALTHY": "false",
+            "SERVICE_VERSION": prev_config.version,
+        }
+        container = await self._docker.deploy_version(
+            prev_config,
+            env_overrides=restored_env_overrides,
+        )
+
+        if container is None:
+            return RemediationResult(
+                action="rollback_deploy",
+                success=False,
+                message=f"Failed to start previous version for {service}",
+                before_state=before_state,
+                after_state=before_state,
+            )
+
+        # Step 3: Wait for the restored container to become healthy
+        logger.info("Rollback: waiting for %s to become healthy", service)
+        became_healthy = await self._docker.wait_for_health(service, retries=15, delay=2.0)
+
+        after_health = await self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+            "version": after_health.get("version", "unknown"),
+            "image": after_health.get("image", "unknown"),
+        }
+
+        if became_healthy:
+            message = (
+                f"Rolled back {service}: "
+                f"{before_state['version']} → {prev_config.version} — healthy"
+            )
+        else:
+            message = (
+                f"Rolled back {service}: "
+                f"{before_state['version']} → {prev_config.version} — "
+                f"health status: {after_health.get('health', 'unknown')}"
+            )
+
+        logger.info("Rollback result: success=%s message=%s", became_healthy, message)
+
+        return RemediationResult(
+            action="rollback_deploy",
+            success=became_healthy,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_restart(self, request: RemediationRequest) -> RemediationResult:
+        """Restart a service container using real Docker operations."""
+        service = request.target_service
+        before_health = await self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+            "version": before_health.get("version", "unknown"),
+        }
+
+        success = await self._docker.restart_container(service)
+        if success:
+            await self._docker.wait_for_health(service, retries=10, delay=2.0)
+
+        after_health = await self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+            "version": after_health.get("version", "unknown"),
+        }
+
+        return RemediationResult(
+            action="restart_service",
+            success=success,
+            message=f"Restarted {service}" if success else f"Failed to restart {service}",
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_circuit_break(self, request: RemediationRequest) -> RemediationResult:
+        """Disable the toxiproxy to trigger the fallback logic."""
+        service = request.target_service
+        # In our scenario, proxy name is payment-rpc-proxy
+        # The parameters dict might contain proxy_name, fallback to default
+        proxy_name = request.parameters.get("proxy_name", "payment-rpc-proxy")
+        
+        before_state = {"proxy": proxy_name, "enabled": True}
+        
+        # Disable proxy
+        updated = await asyncio.to_thread(self._toxiproxy.update_proxy, proxy_name, enabled=False)
+        
+        if updated:
+            success = True
+            message = f"Circuit breaker OPENED via Toxiproxy (proxy {proxy_name} disabled)"
+            after_state = {"proxy": proxy_name, "enabled": False}
+        else:
+            success = False
+            message = f"Failed to open circuit breaker on Toxiproxy for {proxy_name}"
+            after_state = before_state
+
+        return RemediationResult(
+            action="circuit_break",
+            success=success,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_switch_to_secondary(self, request: RemediationRequest) -> RemediationResult:
+        """Switch the toxiproxy upstream to the secondary RPC."""
+        service = request.target_service
+        proxy_name = request.parameters.get("proxy_name", "payment-rpc-proxy")
+        secondary_upstream = request.parameters.get("secondary_upstream", "rpc-service-secondary:5000")
+        
+        proxy_info = await asyncio.to_thread(self._toxiproxy.get_proxy, proxy_name)
+        before_upstream = proxy_info.get("upstream") if proxy_info else "unknown"
+        before_state = {"proxy": proxy_name, "upstream": before_upstream}
+        
+        # Remove any toxic (like timeout) before switching if we want to ensure recovery
+        # (Though switching alone might bypass the toxic if toxics are stream specific, but Toxiproxy toxics are proxy-wide)
+        # Actually, let's remove the toxic if we know it
+        toxic_name = request.parameters.get("toxic_name", "outage_timeout")
+        await asyncio.to_thread(self._toxiproxy.remove_toxic, proxy_name, toxic_name)
+
+        # Switch upstream
+        updated = await asyncio.to_thread(self._toxiproxy.update_proxy, proxy_name, upstream=secondary_upstream)
+        
+        if updated:
+            success = True
+            message = f"Switched proxy {proxy_name} upstream to {secondary_upstream}"
+            after_state = {"proxy": proxy_name, "upstream": secondary_upstream}
+        else:
+            success = False
+            message = f"Failed to switch proxy upstream for {proxy_name}"
+            after_state = before_state
+
+        return RemediationResult(
+            action="switch_to_secondary",
+            success=success,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_reset_connection_pool(self, request: RemediationRequest) -> RemediationResult:
+        """Reset the connection pool by removing toxics and restarting the service."""
+        service = request.target_service
+        proxy_name = request.parameters.get("proxy_name", "payment-db-proxy")
+        toxic_name = request.parameters.get("toxic_name", "db_timeout")
+        
+        before_health = await self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+            "proxy": proxy_name,
+            "toxic_removed": False
+        }
+        
+        # Remove the toxic that's causing the DB failure
+        removed = await asyncio.to_thread(self._toxiproxy.remove_toxic, proxy_name, toxic_name)
+        
+        # Restart the payment service to flush its connection pool
+        success = await self._docker.restart_container(service)
+        if success:
+            await self._docker.wait_for_health(service, retries=10, delay=2.0)
+            
+        after_health = await self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+            "proxy": proxy_name,
+            "toxic_removed": removed
+        }
+        
+        message = f"Removed toxic {toxic_name} and restarted {service} to reset connection pool" if success else f"Failed to restart {service} to reset connection pool"
+        
+        return RemediationResult(
+            action="reset_connection_pool",
+            success=success,
+            message=message,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    async def _real_scale_up(self, request: RemediationRequest) -> RemediationResult:
+        """Relieve real CPU exhaustion by lifting the container's CPU quota
+        constraint back to unlimited.
+
+        This docker-compose stack has no load balancer in front of any
+        service, so spinning up additional replicas of the same image (the
+        other reading of "scale up") wouldn't receive any traffic — nothing
+        routes to them. Lifting the CPU quota cap that
+        ``inject_resource_exhaustion`` (backend/simulator/scenarios.py)
+        applies is the remediation that's actually meaningful against how
+        that scenario injects its fault.
+        """
+        service = request.target_service
+
+        before_health = await self._docker.check_health(service)
+        before_state = {
+            "service": service,
+            "status": before_health.get("health", "unknown"),
+        }
+
+        success = await self._docker.restore_resources(service)
+        if success:
+            await self._docker.wait_for_health(service, retries=10, delay=2.0)
+
+        after_health = await self._docker.check_health(service)
+        after_state = {
+            "service": service,
+            "status": after_health.get("health", "unknown"),
+        }
+
+        return RemediationResult(
+            action="scale_up",
+            success=success,
+            message=(
+                f"Lifted CPU quota constraint on {service}"
+                if success
+                else f"Failed to lift CPU constraint on {service}"
+            ),
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+    # -----------------------------------------------------------------
+    # Mock fallback (original behavior, preserved)
+    # -----------------------------------------------------------------
+
+    async def _mock_execute(self, request: RemediationRequest) -> RemediationResult:
+        """Original mock implementation — modifies simulated state."""
         before_state = dict(self._simulated_state)
         action = request.action
         success = True
@@ -113,7 +450,7 @@ class RemediationEngine:
             message = f"Unknown action: {action}"
 
         after_state = dict(self._simulated_state)
-        logger.info("RemediationEngine: action=%s success=%s message=%s", action, success, message)
+        logger.info("RemediationEngine(mock): action=%s success=%s message=%s", action, success, message)
 
         return RemediationResult(
             action=action,

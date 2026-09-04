@@ -8,21 +8,71 @@ Verifies:
 5. Incident becomes RESOLVED
 """
 
+import asyncio
 import pytest
 from httpx import AsyncClient, ASGITransport
 
+import backend.orchestrator as orchestrator_module
+import backend.platform.storage as storage_module
 from backend.api.app import app
-from backend.platform.storage import get_storage
+from backend.platform.storage import Storage
 from backend.platform.events import get_event_bus
 
 
 @pytest.fixture(autouse=True)
-async def reset_storage():
-    """Reset storage before each test."""
-    storage = get_storage()
-    storage._incidents.clear()
-    storage._timelines.clear()
+async def reset_storage(monkeypatch):
+    """Give each test a fresh in-memory SQLite-backed Storage singleton.
+
+    The routes under test call the module-level `get_storage()` singleton,
+    so we swap it out directly rather than reaching into private attributes
+    of the old in-memory mock (which no longer exist on the real Storage).
+
+    Also blanks any LLM provider keys from the local `.env` for the duration
+    of the test: this suite asserts deterministic severity/approval behavior
+    that depends on the mock agents' keyword-based root-cause detection —
+    IncidentOrchestrator() defaults to the real LLM-backed agents whenever a
+    key is configured, which would make these tests non-deterministic (and
+    make real, paid API calls) if a developer's `.env` has keys set.
+    """
+    import backend.platform.config as config_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    config_module._settings = None
+
+    storage = Storage(db_path=":memory:")
+    await storage.init_db()
+    storage_module._storage = storage
     yield
+    await storage.close()
+    storage_module._storage = None
+    orchestrator_module._orchestrator = None
+    config_module._settings = None
+
+
+# Scenarios that produce P1/P2 severity (require approval)
+REQUIRES_APPROVAL = {"bad_deployment", "database_failure", "dependency_outage"}
+
+
+async def _trigger_and_wait(client, service_name, scenario, wait_for_approval=True):
+    """Trigger an incident, approve if needed, and wait for completion."""
+    response = await client.post("/incidents/trigger", json={
+        "service_name": service_name,
+        "scenario": scenario,
+    })
+    assert response.status_code == 200
+    incident_id = response.json()["incident_id"]
+
+    if wait_for_approval and scenario in REQUIRES_APPROVAL:
+        # Wait for pipeline to reach the approval point
+        await asyncio.sleep(0.5)
+        # Approve the incident
+        approve_response = await client.post(f"/incidents/{incident_id}/approve")
+        assert approve_response.status_code == 200
+
+    # Wait for pipeline to complete
+    await asyncio.sleep(2.0)
+    return incident_id
 
 
 @pytest.mark.e2e
@@ -33,21 +83,11 @@ class TestIncidentPipeline:
         """Trigger an incident and verify the full pipeline completes."""
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            # Step 1: Trigger incident
-            response = await client.post("/incidents/trigger", json={
-                "service_name": "payment-service",
-                "scenario": "bad_deployment",
-            })
-            assert response.status_code == 200
-            data = response.json()
-            incident_id = data["incident_id"]
-            assert data["status"] == "processing"
+            incident_id = await _trigger_and_wait(
+                client, "payment-service", "bad_deployment"
+            )
 
-            # Step 2: Wait for pipeline to complete
-            import asyncio
-            await asyncio.sleep(2.0)
-
-            # Step 3: Verify incident exists and is resolved
+            # Verify incident exists and is resolved
             response = await client.get(f"/incidents/{incident_id}")
             assert response.status_code == 200
             incident = response.json()
@@ -55,7 +95,7 @@ class TestIncidentPipeline:
             assert incident["severity"] is not None
             assert incident["report"] is not None
 
-            # Step 4: Verify timeline has all stages
+            # Verify timeline has all stages
             response = await client.get(f"/incidents/{incident_id}/timeline")
             assert response.status_code == 200
             timeline = response.json()["timeline"]
@@ -82,12 +122,11 @@ class TestIncidentPipeline:
         """Verify list incidents endpoint works."""
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            # Trigger an incident first
+            # Trigger an incident first (resource_exhaustion is P3, no approval needed)
             await client.post("/incidents/trigger", json={
                 "service_name": "test-service",
-                "scenario": "database_failure",
+                "scenario": "resource_exhaustion",
             })
-            import asyncio
             await asyncio.sleep(1.0)
 
             # List incidents
@@ -113,15 +152,9 @@ class TestIncidentPipeline:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             for scenario in scenarios:
-                response = await client.post("/incidents/trigger", json={
-                    "service_name": f"test-{scenario}",
-                    "scenario": scenario,
-                })
-                assert response.status_code == 200
-                incident_id = response.json()["incident_id"]
-
-                import asyncio
-                await asyncio.sleep(2.0)
+                incident_id = await _trigger_and_wait(
+                    client, f"test-{scenario}", scenario
+                )
 
                 # Verify timeline
                 response = await client.get(f"/incidents/{incident_id}/timeline")

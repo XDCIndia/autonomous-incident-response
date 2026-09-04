@@ -14,19 +14,30 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from backend.contracts import Incident, IncidentState, TelemetryEvent
-from backend.orchestrator import IncidentOrchestrator
+from backend.contracts import Incident, IncidentState, TelemetryEvent, RemediationRequest
+from backend.orchestrator import IncidentOrchestrator, get_orchestrator
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
+from backend.platform.knowledge_base import search_similar
 from backend.platform.storage import get_storage
+from backend.simulator.docker_controller import DockerController
+from backend.simulator.toxiproxy_client import ToxiproxyClient
+from backend.simulator.health_checker import verify_service_health
+from backend.remediation.actions import RemediationEngine
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Global State
+# ---------------------------------------------------------------------------
+docker_ctl: Optional[DockerController] = None
+toxiproxy_ctl: Optional[ToxiproxyClient] = None
 
 # ---------------------------------------------------------------------------
 # App lifecycle
@@ -35,10 +46,44 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown."""
+    global docker_ctl, toxiproxy_ctl
     settings = get_settings()
     storage = get_storage()
     await storage.init_db()
     logger.info("Application started — env=%s", settings.app_env)
+    
+    try:
+        docker_ctl = await asyncio.to_thread(DockerController)
+    except Exception as e:
+        logger.warning("Could not initialize DockerController: %s", e)
+
+    # Construct the orchestrator singleton now (rather than lazily on the
+    # first request) so its verification stage picks up the real
+    # DockerController — a lazy get_orchestrator() call from a later request
+    # would only ever see it as None, permanently falling back to the stub.
+    get_orchestrator(docker_ctl=docker_ctl)
+
+
+    try:
+        toxiproxy_ctl = await asyncio.to_thread(ToxiproxyClient)
+        await asyncio.to_thread(toxiproxy_ctl.reset)
+        # Pre-create the proxy for the dependency outage scenario
+        await asyncio.to_thread(
+            toxiproxy_ctl.create_proxy,
+            name="payment-rpc-proxy",
+            listen="0.0.0.0:8080",
+            upstream="rpc-service-primary:5000",
+        )
+        # Pre-create the proxy for the database failure scenario
+        await asyncio.to_thread(
+            toxiproxy_ctl.create_proxy,
+            name="payment-db-proxy",
+            listen="0.0.0.0:8081",
+            upstream="db-service:5000",
+        )
+    except Exception as e:
+        logger.warning("Could not initialize ToxiproxyClient: %s", e)
+        
     yield
     await storage.close()
     logger.info("Application shutdown")
@@ -80,6 +125,20 @@ class TriggerResponse(BaseModel):
     message: str
 
 
+class ApprovalResponse(BaseModel):
+    """Response for approval actions."""
+    incident_id: str
+    status: str
+    message: str
+
+
+class FaultInjectionRequest(BaseModel):
+    """Request to inject a fault via API."""
+    scenario: str
+    service_name: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # REST Endpoints
 # ---------------------------------------------------------------------------
@@ -88,6 +147,145 @@ class TriggerResponse(BaseModel):
 async def health():
     """Health check endpoint."""
     return {"status": "ok", "service": "autonomous-incident-response"}
+
+
+@app.get("/services/health")
+async def services_health(service: str = "payment-service"):
+    """Check the health of a specific IRAS-managed service."""
+    if docker_ctl is None:
+        raise HTTPException(status_code=503, detail="Docker controller not available")
+    
+    status = await docker_ctl.check_health(service)
+    return status
+
+
+@app.post("/faults/inject")
+async def inject_fault(request: FaultInjectionRequest):
+    """Inject a fault using real Docker operations."""
+    if docker_ctl is None:
+        raise HTTPException(status_code=503, detail="Docker controller not available")
+
+    from backend.simulator.scenarios import (
+        inject_bad_deployment,
+        inject_dependency_outage,
+        inject_database_failure,
+        inject_resource_exhaustion,
+    )
+
+    try:
+        if request.scenario == "bad_deployment":
+            result = await inject_bad_deployment(
+                service=request.service_name,
+                docker_controller=docker_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": {
+                    "previous_config": result.previous_config,
+                    "bad_version": result.bad_version
+                }
+            }
+        elif request.scenario == "resource_exhaustion":
+            result = await inject_resource_exhaustion(
+                service=request.service_name,
+                docker_controller=docker_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
+            }
+        elif request.scenario == "dependency_outage":
+            if toxiproxy_ctl is None:
+                raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+            result = await asyncio.to_thread(
+                inject_dependency_outage,
+                service=request.service_name,
+                toxiproxy_client=toxiproxy_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
+            }
+        elif request.scenario == "database_failure":
+            if toxiproxy_ctl is None:
+                raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+            result = await asyncio.to_thread(
+                inject_database_failure,
+                service=request.service_name,
+                toxiproxy_client=toxiproxy_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Scenario {request.scenario} not implemented for direct injection")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Fault injection failed for %s/%s: %s", request.service_name, request.scenario, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Fault injection failed: {e}")
+
+
+@app.post("/remediation/execute")
+async def execute_remediation(request: RemediationRequest):
+    """Execute a remediation action using real Docker operations."""
+    if docker_ctl is None:
+        raise HTTPException(status_code=503, detail="Docker controller not available")
+
+    engine = RemediationEngine(
+        docker_controller=docker_ctl,
+        toxiproxy_client=toxiproxy_ctl
+    )
+    try:
+        result = await engine.execute(request)
+    except Exception as e:
+        logger.error("Remediation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Remediation failed: {e}")
+
+    # Also run verification if successful — use host-mapped ports for HTTP checks
+    verification = None
+    if result.success:
+        host_port_map = {
+            "payment-service": "5001",
+            "rpc-service-primary": "5002",
+            "rpc-service-secondary": "5003",
+            "db-service": "5004",
+        }
+        port = host_port_map.get(request.target_service, "5000")
+        health_url = f"http://localhost:{port}/health"
+
+        verify_urls = []
+        if request.target_service == "payment-service" and request.action in ("circuit_break", "switch_to_secondary", "reset_connection_pool"):
+            verify_urls.append(f"http://localhost:{port}/pay")
+
+        try:
+            verification = await verify_service_health(
+                docker_ctl,
+                request.target_service,
+                health_url=health_url,
+                verify_urls=verify_urls
+            )
+        except Exception as e:
+            logger.warning("Verification failed after remediation: %s", e)
+
+    return {
+        "status": "success" if result.success else "failure",
+        "result": result.model_dump(mode="json"),
+        "verification": verification.model_dump(mode="json") if verification else None
+    }
 
 
 @app.post("/incidents/trigger", response_model=TriggerResponse)
@@ -111,30 +309,40 @@ async def trigger_incident(request: TriggerRequest):
     )
 
     # Inject signals based on scenario
-    scenario_map = {
-        "bad_deployment": lambda: inject_bad_deployment(service=request.service_name),
-        "database_failure": lambda: inject_database_failure(service=request.service_name),
-        "dependency_outage": lambda: inject_dependency_outage(service=request.service_name),
-        "resource_exhaustion": lambda: inject_resource_exhaustion(service=request.service_name),
-    }
-
-    injector = scenario_map.get(request.scenario)
-    if injector is None:
+    # Note: inject_bad_deployment and inject_resource_exhaustion are async
+    # (use async DockerController); the others are sync (use sync
+    # ToxiproxyClient or are pure mock). None of these pass docker_ctl/
+    # toxiproxy_ctl here, so this endpoint stays mock-signal-only for all
+    # four scenarios — real injection is only wired up via /faults/inject.
+    if request.scenario == "bad_deployment":
+        result = await inject_bad_deployment(service=request.service_name)
+    elif request.scenario == "database_failure":
+        result = inject_database_failure(service=request.service_name)
+    elif request.scenario == "dependency_outage":
+        result = inject_dependency_outage(service=request.service_name)
+    elif request.scenario == "resource_exhaustion":
+        result = await inject_resource_exhaustion(service=request.service_name)
+    else:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown scenario: {request.scenario}. "
-                   f"Available: {list(scenario_map.keys())}",
+                   f"Available: [bad_deployment, database_failure, dependency_outage, resource_exhaustion]",
         )
 
-    signals = injector()
-    incident.signals = signals
+    # Extract signals and metadata if the injector returned a FaultInjectionResult
+    if hasattr(result, "signals"):
+        incident.signals = result.signals
+    else:
+        incident.signals = result
 
     # Save initial state
     storage = get_storage()
     await storage.save_incident(incident)
 
-    # Run pipeline in background
-    orchestrator = IncidentOrchestrator(storage=storage, event_bus=get_event_bus())
+    # Run pipeline in background (use singleton orchestrator for approval support)
+    orchestrator = get_orchestrator()
+    orchestrator.storage = storage
+    orchestrator.event_bus = get_event_bus()
 
     async def _run():
         try:
@@ -179,6 +387,64 @@ async def get_incident(incident_id: str):
     return incident.model_dump(mode="json")
 
 
+@app.post("/incidents/{incident_id}/approve", response_model=ApprovalResponse)
+async def approve_incident(incident_id: str):
+    """Approve remediation for a SEMI_AUTONOMOUS incident."""
+    storage = get_storage()
+    incident = await storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    orchestrator = get_orchestrator()
+    processed = await orchestrator.approve(incident_id)
+
+    if not processed:
+        return ApprovalResponse(
+            incident_id=incident_id,
+            status="no_pending_approval",
+            message="No pending approval for this incident",
+        )
+
+    return ApprovalResponse(
+        incident_id=incident_id,
+        status="approved",
+        message="Remediation approved — pipeline will continue",
+    )
+
+
+@app.post("/incidents/{incident_id}/reject", response_model=ApprovalResponse)
+async def reject_incident(incident_id: str):
+    """Reject remediation for a SEMI_AUTONOMOUS incident."""
+    storage = get_storage()
+    incident = await storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    orchestrator = get_orchestrator()
+    processed = await orchestrator.reject(incident_id)
+
+    if not processed:
+        return ApprovalResponse(
+            incident_id=incident_id,
+            status="no_pending_approval",
+            message="No pending approval for this incident",
+        )
+
+    return ApprovalResponse(
+        incident_id=incident_id,
+        status="rejected",
+        message="Remediation rejected — skipping to report",
+    )
+
+
+@app.get("/knowledge-base/search")
+async def search_knowledge_base(query: str = Query(..., min_length=1), top_k: int = Query(3, ge=1, le=10)):
+    """Search historical incidents similar to `query` (TF-IDF cosine similarity)."""
+    storage = get_storage()
+    results = await search_similar(storage, query, top_k=top_k)
+    return {"query": query, "results": results}
+
+
 @app.get("/incidents/{incident_id}/timeline")
 async def get_timeline(incident_id: str):
     """Get the timeline for an incident."""
@@ -195,6 +461,17 @@ async def get_timeline(incident_id: str):
 # ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
+
+@app.get("/incidents/{incident_id}/approval")
+async def get_approval_status(incident_id: str):
+    """Check if an incident has a pending approval."""
+    orchestrator = get_orchestrator()
+    has_pending = incident_id in orchestrator._approval_events
+    return {
+        "incident_id": incident_id,
+        "has_pending_approval": has_pending,
+    }
+
 
 @app.websocket("/ws/incidents/{incident_id}")
 async def websocket_incident(websocket: WebSocket, incident_id: str):

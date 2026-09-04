@@ -19,6 +19,8 @@ dependencies = [
     "openai>=1.50.0",
     "aiosqlite>=0.20.0",
     "websockets>=13.0",
+    "langgraph>=0.2.0",
+    "docker>=7.0.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +39,7 @@ packages = ["backend"]
 asyncio_mode = "auto"
 testpaths = ["backend/tests"]
 addopts = "--tb=short"
+markers = ["e2e: end-to-end tests"]
 
 [tool.ruff]
 line-length = 100
