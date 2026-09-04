@@ -1,0 +1,55 @@
+"""Application configuration.
+
+Reads from environment variables. All integrations fall back to mock
+clients when credentials are absent.
+"""
+
+from __future__ import annotations
+
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    """Application settings — all fields have safe defaults."""
+
+    # App
+    app_name: str = "Autonomous Incident Response"
+    app_env: str = "development"
+    debug: bool = True
+
+    # Backend
+    backend_host: str = "0.0.0.0"
+    backend_port: int = 8000
+
+    # Database
+    database_url: str = "sqlite+aiosqlite:///./incidents.db"
+
+    # LLM — Anthropic
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-20250514"
+
+    # LLM — OpenAI
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o"
+
+    # Which provider to use as primary: "anthropic" | "openai"
+    llm_provider: str = "anthropic"
+
+    # Incident pipeline
+    rca_confidence_threshold: float = 0.7
+    rca_max_retries: int = 1
+
+    # Severity thresholds
+    approval_timeout_minutes: int = 15
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
