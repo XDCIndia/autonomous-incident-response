@@ -270,3 +270,91 @@ async def test_autonomous_pipeline_drives_real_engine_and_verifier(monkeypatch):
         assert incident.state.value == "resolved"
     finally:
         await storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #16 — Toxiproxy state must be reset per incident, and injections must
+# only report success when a fault genuinely took effect.
+# ---------------------------------------------------------------------------
+
+
+class FakeToxiproxyClient:
+    """Sync stand-in for ToxiproxyClient with controllable proxy state."""
+
+    def __init__(self, *, enabled: bool = True, toxics: list[str] | None = None):
+        self.enabled = enabled
+        self.toxics = list(toxics or [])
+        self.reset_calls = 0
+
+    def reset(self) -> bool:
+        self.reset_calls += 1
+        self.enabled = True
+        self.toxics = []
+        return True
+
+    def add_toxic(self, proxy_name, toxic_name, toxic_type, toxicity=1.0, attributes=None):
+        # Mirror Toxiproxy: a stale toxic with the same name returns a truthy
+        # payload via HTTP 409 without applying anything new.
+        self.toxics.append(toxic_name)
+        return {"name": toxic_name, "type": toxic_type}
+
+    def get_proxy(self, proxy_name: str) -> dict:
+        return {
+            "name": proxy_name,
+            "enabled": self.enabled,
+            "toxics": [{"name": t} for t in self.toxics],
+        }
+
+
+def test_toxiproxy_injectors_report_no_fault_when_proxy_disabled():
+    """A toxic on a disabled proxy does not degrade the service — injection
+    must not claim a real fault happened (the pre-#16 false success)."""
+    from backend.simulator.scenarios import inject_database_failure, inject_dependency_outage
+
+    fake = FakeToxiproxyClient(enabled=False, toxics=[])  # e.g. after a circuit_break
+    dep = inject_dependency_outage(service="payment-service", toxiproxy_client=fake)
+    assert dep.docker_performed is False
+    db = inject_database_failure(service="payment-service", toxiproxy_client=fake)
+    assert db.docker_performed is False
+
+
+def test_toxiproxy_injectors_report_fault_when_proxy_enabled():
+    from backend.simulator.scenarios import inject_database_failure, inject_dependency_outage
+
+    fake = FakeToxiproxyClient(enabled=True, toxics=[])
+    dep = inject_dependency_outage(service="payment-service", toxiproxy_client=fake)
+    assert dep.docker_performed is True
+    assert dep.metadata["toxic_name"] == "outage_timeout"
+
+    fake2 = FakeToxiproxyClient(enabled=True, toxics=[])
+    db = inject_database_failure(service="payment-service", toxiproxy_client=fake2)
+    assert db.docker_performed is True
+    assert db.metadata["toxic_name"] == "db_timeout"
+
+
+def test_toxiproxy_reset_reports_success_and_failure():
+    """ToxiproxyClient.reset() must tell callers whether the clean baseline
+    was actually applied (it previously swallowed errors silently)."""
+    from backend.simulator.toxiproxy_client import ToxiproxyClient
+
+    class _SyncResp:
+        def raise_for_status(self):
+            return None
+
+    class _FakeSyncClient:
+        def post(self, url, *args, **kwargs):
+            self.last_url = url
+            return _SyncResp()
+
+    fake_ok = _FakeSyncClient()
+    client = ToxiproxyClient(api_url="http://toxiproxy.invalid:8474")
+    client.client = fake_ok  # type: ignore[assignment]
+    assert client.reset() is True
+    assert fake_ok.last_url.endswith("/reset")
+
+    class _FakeSyncClientFail:
+        def post(self, url, *args, **kwargs):
+            raise ConnectionError("toxiproxy down")
+
+    client.client = _FakeSyncClientFail()  # type: ignore[assignment]
+    assert client.reset() is False

@@ -12,14 +12,21 @@ class ToxiproxyClient:
         self.api_url = (api_url or os.environ.get("TOXIPROXY_URL", "http://localhost:8474")).rstrip("/")
         self.client = httpx.Client(timeout=5.0)
 
-    def reset(self):
-        """Enable all proxies and remove all active toxics."""
+    def reset(self) -> bool:
+        """Enable all proxies and remove all active toxics.
+
+        Returns True when the reset was applied.  Used before each real
+        fault injection so repeated incidents always start from a clean
+        baseline (see issue #16).
+        """
         try:
             resp = self.client.post(f"{self.api_url}/reset")
             resp.raise_for_status()
             logger.info("Toxiproxy reset successful")
+            return True
         except Exception as e:
             logger.error("Failed to reset toxiproxy: %s", e)
+            return False
 
     def create_proxy(self, name: str, listen: str, upstream: str, enabled: bool = True) -> Optional[Dict[str, Any]]:
         """Create a new proxy."""
