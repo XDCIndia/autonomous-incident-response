@@ -27,7 +27,21 @@ def _free_port() -> int:
 def live_server(tmp_path_factory):
     port = _free_port()
     workdir = tmp_path_factory.mktemp("live_server")
-    env = {**os.environ, "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db"}
+    env = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db",
+        # This suite tests real HTTP/concurrency behavior against synthetic
+        # service names (e.g. "load-svc-N") that don't correspond to actual
+        # containers — it doesn't stand up the docker-compose service stack.
+        # Point DOCKER_HOST at a socket that can't exist so DockerController's
+        # startup ping() fails and the app falls back to None, keeping the
+        # orchestrator's verification stage on its deterministic stub even
+        # when a real Docker daemon happens to be reachable on this machine
+        # (otherwise the incident pipeline's real health check correctly, but
+        # unhelpfully for this suite, reports these nonexistent services as
+        # unhealthy and the incidents never resolve).
+        "DOCKER_HOST": "unix:///nonexistent/docker.sock",
+    }
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "backend.api.app:app", "--host", "127.0.0.1", "--port", str(port)],
