@@ -29,6 +29,27 @@ if TYPE_CHECKING:
     from backend.simulator.docker_controller import ContainerConfig, DockerController
     from backend.simulator.toxiproxy_client import ToxiproxyClient
 
+
+def _toxic_is_live(
+    toxiproxy_client: ToxiproxyClient | None,
+    proxy_name: str,
+    toxic_name: str,
+) -> bool:
+    """Confirm a fault is genuinely applied: proxy enabled AND toxic present.
+
+    ``add_toxic`` returns a truthy payload even when a stale toxic with the
+    same name already exists (HTTP 409) or when the proxy is disabled — in
+    both cases no *new* fault takes effect on the service.  Checking the live
+    proxy state keeps ``docker_performed`` honest so a simulated failure is
+    never reported when nothing actually degraded.
+    """
+    if toxiproxy_client is None:
+        return False
+    proxy = toxiproxy_client.get_proxy(proxy_name)
+    if not proxy or not proxy.get("enabled"):
+        return False
+    return any(t.get("name") == toxic_name for t in proxy.get("toxics", []))
+
 logger = logging.getLogger(__name__)
 
 
@@ -195,7 +216,7 @@ def inject_database_failure(
             toxic_type="timeout",
             attributes={"timeout": 30000}
         )
-        if toxic:
+        if toxic and _toxic_is_live(toxiproxy_client, proxy_name, "db_timeout"):
             docker_performed = True
             metadata = {
                 "proxy_name": proxy_name,
@@ -204,6 +225,11 @@ def inject_database_failure(
                 "toxic_type": "timeout",
             }
             logger.info("Injected database failure on %s", proxy_name)
+        else:
+            logger.error(
+                "Database failure NOT applied on %s: toxic missing or proxy disabled",
+                proxy_name,
+            )
     
     signals = [
         TelemetryEvent(
@@ -281,7 +307,7 @@ def inject_dependency_outage(
             toxic_type="timeout",
             attributes={"timeout": 30000}
         )
-        if toxic:
+        if toxic and _toxic_is_live(toxiproxy_client, proxy_name, "outage_timeout"):
             docker_performed = True
             metadata = {
                 "proxy_name": proxy_name,
@@ -292,6 +318,11 @@ def inject_dependency_outage(
                 "secondary_upstream": "rpc-service-secondary:5000"
             }
             logger.info("Injected dependency outage on %s", proxy_name)
+        else:
+            logger.error(
+                "Dependency outage NOT applied on %s: toxic missing or proxy disabled",
+                proxy_name,
+            )
     
     signals = [
         TelemetryEvent(

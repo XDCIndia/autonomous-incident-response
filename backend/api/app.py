@@ -123,6 +123,32 @@ async def _ensure_real_orchestrator() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Per-incident environment reset (issue #16)
+# ---------------------------------------------------------------------------
+
+_TOXIPROXY_SCENARIOS = ("database_failure", "dependency_outage")
+
+
+async def _reset_toxiproxy_before_injection(scenario: str) -> None:
+    """Restore a clean Toxiproxy baseline before injecting a toxiproxy-backed
+    fault, so every incident in one backend process starts from a healthy
+    environment (proxies enabled, no stale toxics).
+
+    Without this a previous incident's ``circuit_break`` leaves the RPC proxy
+    disabled forever, so later dependency_outage runs never actually degrade
+    the service yet are reported and resolved as genuine recoveries.
+    """
+    if scenario not in _TOXIPROXY_SCENARIOS or toxiproxy_ctl is None:
+        return
+    ok = await asyncio.to_thread(toxiproxy_ctl.reset)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reset Toxiproxy before {scenario} injection",
+        )
+
+
+# ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
 
@@ -257,47 +283,55 @@ async def inject_fault(request: FaultInjectionRequest):
                 docker_controller=docker_ctl,
                 **request.parameters,
             )
-            return {
-                "status": "success",
-                "message": f"Injected {request.scenario} on {request.service_name}",
-                "docker_performed": result.docker_performed,
-                "metadata": {
-                    "previous_config": result.previous_config,
-                    "bad_version": result.bad_version
-                }
+            metadata = {
+                "previous_config": result.previous_config,
+                "bad_version": result.bad_version,
             }
         elif request.scenario == "dependency_outage":
             if toxiproxy_ctl is None:
                 raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+            # Clean baseline first so the fault below genuinely degrades the
+            # service even when a previous incident left the proxy disabled.
+            await _reset_toxiproxy_before_injection(request.scenario)
             result = await asyncio.to_thread(
                 inject_dependency_outage,
                 service=request.service_name,
                 toxiproxy_client=toxiproxy_ctl,
                 **request.parameters,
             )
-            return {
-                "status": "success",
-                "message": f"Injected {request.scenario} on {request.service_name}",
-                "docker_performed": result.docker_performed,
-                "metadata": result.metadata
-            }
+            metadata = result.metadata
         elif request.scenario == "database_failure":
             if toxiproxy_ctl is None:
                 raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+            await _reset_toxiproxy_before_injection(request.scenario)
             result = await asyncio.to_thread(
                 inject_database_failure,
                 service=request.service_name,
                 toxiproxy_client=toxiproxy_ctl,
                 **request.parameters,
             )
-            return {
-                "status": "success",
-                "message": f"Injected {request.scenario} on {request.service_name}",
-                "docker_performed": result.docker_performed,
-                "metadata": result.metadata
-            }
+            metadata = result.metadata
         else:
             raise HTTPException(status_code=400, detail=f"Scenario {request.scenario} not implemented for direct injection")
+
+        # A real injection must actually have degraded the environment — never
+        # report success when the fault did not take effect (stale/disabled
+        # proxy, missing container, etc.).
+        if not result.docker_performed:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Fault injection for {request.scenario} did not take effect on "
+                    f"{request.service_name} (container/proxy unavailable or proxy disabled)"
+                ),
+            )
+
+        return {
+            "status": "success",
+            "message": f"Injected {request.scenario} on {request.service_name}",
+            "docker_performed": result.docker_performed,
+            "metadata": metadata,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -380,6 +414,13 @@ async def trigger_incident(request: TriggerRequest):
     # (mock signals + mock remediation) so the two never mix.
     use_real_env = await _ensure_real_orchestrator()
 
+    # Every incident must start from a clean environment: a previous
+    # circuit_break may have left the RPC proxy disabled / toxics in place,
+    # which would otherwise let this incident "succeed" without ever failing
+    # the service (issue #16).
+    if use_real_env and request.scenario in _TOXIPROXY_SCENARIOS:
+        await _reset_toxiproxy_before_injection(request.scenario)
+
     # Inject the fault into the real environment (when available) and collect
     # the telemetry that the investigators will reason about.
     #
@@ -410,6 +451,23 @@ async def trigger_incident(request: TriggerRequest):
             status_code=400,
             detail=f"Unknown scenario: {request.scenario}. "
                    f"Available: [bad_deployment, database_failure, dependency_outage, resource_exhaustion]",
+        )
+
+    # A real-mode fault must genuinely have taken effect — never let the
+    # pipeline fabricate an incident on mock signals when the environment was
+    # supposed to be driven (issue #16 / #14).
+    real_capable_scenarios = ("bad_deployment", "database_failure", "dependency_outage")
+    if (
+        use_real_env
+        and request.scenario in real_capable_scenarios
+        and not result.docker_performed
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to inject real {request.scenario} fault on "
+                f"{request.service_name} — environment did not degrade"
+            ),
         )
 
     # Extract signals and metadata if the injector returned a FaultInjectionResult

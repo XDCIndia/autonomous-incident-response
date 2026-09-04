@@ -50,12 +50,18 @@ async def test_dependency_outage_e2e():
         assert proxy_name == "payment-rpc-proxy"
         
         print("Injected Dependency Outage successfully.")
-        
-        # 3. Check /pay endpoint on payment-service to see if it times out
-        # Actually, the fault injection adds a 30s timeout on Toxiproxy
-        # Since payment-service is exposed on port 5001 locally, we can try to call it if we want
-        # But for E2E we'll trust the health verification to check it post-remediation
-        
+
+        # 3. The fault must genuinely degrade the service BEFORE remediation:
+        #    with the 30s timeout toxic on the RPC proxy, /pay must not return
+        #    200.  (Regression check for #16 — on a stale/disabled proxy from a
+        #    previous incident /pay keeps returning 200 via fallback_cache and
+        #    this test used to pass spuriously.)
+        pay_before = await client.get("http://localhost:5001/pay", timeout=10.0)
+        assert pay_before.status_code != 200, (
+            f"/pay returned {pay_before.status_code} after injection — no real fault "
+            "was applied (proxy already disabled / stale toxics?)"
+        )
+
         # 4. Execute Remediation (circuit_break)
         rem_resp = await client.post(
             f"{API_URL}/remediation/execute",
