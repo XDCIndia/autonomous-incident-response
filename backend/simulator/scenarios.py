@@ -8,7 +8,10 @@ Real Docker fault injection:
     When a ``DockerController`` is provided, ``inject_bad_deployment``
     also performs actual container replacement (healthy → bad).  The full
     container configuration is serialized into the telemetry metadata so
-    that the remediation engine can restore it exactly.
+    that the remediation engine can restore it exactly. ``inject_resource_
+    exhaustion`` similarly throttles the container's CPU quota and spawns
+    real CPU-burning processes inside it (self-reverting on a timer, since
+    this scenario has no real remediation hookup yet).
 
 Mock mode (no controller):
     Returns deterministic TelemetryEvent signals only — unchanged from
@@ -335,15 +338,56 @@ def inject_dependency_outage(
     )
 
 
-def inject_resource_exhaustion(
-    service: str = "order-service",
-) -> list[TelemetryEvent]:
-    """Simulate gradual memory leak leading to resource exhaustion.
+async def inject_resource_exhaustion(
+    service: str = "payment-service",
+    cpu_quota_pct: int = 25,
+    workers: int = 2,
+    duration_seconds: int = 60,
+    docker_controller: DockerController | None = None,
+) -> FaultInjectionResult:
+    """Simulate gradual CPU/memory exhaustion — slow degradation, not a spike.
 
-    Slow degradation, not a sudden spike.
+    **Mock mode** (``docker_controller is None``):
+        Returns deterministic telemetry signals only.
+
+    **Real mode** (``docker_controller`` provided):
+        Caps the container's CPU quota and spawns real CPU-burning processes
+        inside it via ``DockerController.exhaust_resources`` — see that
+        method for why both are needed together. Self-reverts after
+        ``duration_seconds`` (this scenario has no real remediation hookup
+        yet, unlike the other three).
+
+    Note: the previous default target was ``order-service``, which was never
+    a real docker-compose service — there was nothing for this scenario to
+    act on. Defaults to ``payment-service`` (a real service, same default as
+    the other three ``inject_*`` functions) instead.
     """
     now = datetime.now(timezone.utc)
-    return [
+
+    docker_performed = False
+    metadata: dict[str, Any] = {}
+
+    if docker_controller is not None:
+        result = await docker_controller.exhaust_resources(
+            service,
+            cpu_quota_pct=cpu_quota_pct,
+            workers=workers,
+            duration_seconds=duration_seconds,
+        )
+        docker_performed = result.get("started", False)
+        if docker_performed:
+            metadata = {
+                "cpu_quota_pct": cpu_quota_pct,
+                "workers": workers,
+                "duration_seconds": duration_seconds,
+            }
+            logger.info("Injected real resource exhaustion on %s", service)
+        else:
+            logger.error(
+                "Cannot inject resource exhaustion on %s: %s", service, result.get("reason")
+            )
+
+    signals = [
         TelemetryEvent(
             timestamp=now,
             source=service,
@@ -352,6 +396,7 @@ def inject_resource_exhaustion(
             metadata={
                 "log_message": f"CPU usage at 95% on {service} — memory leak detected",
                 "root_cause_hint": "resource_exhaustion",
+                **metadata,
             },
         ),
         TelemetryEvent(
@@ -360,7 +405,7 @@ def inject_resource_exhaustion(
             event_type="latency",
             value=1800,
             metadata={
-                "log_message": f"Gradual latency increase: 200ms → 600ms → 1800ms over 2 hours",
+                "log_message": "Gradual latency increase: 200ms → 600ms → 1800ms over 2 hours",
                 "root_cause_hint": "resource_exhaustion",
             },
         ),
@@ -370,8 +415,15 @@ def inject_resource_exhaustion(
             event_type="log_error",
             value=None,
             metadata={
-                "log_message": f"OOM warning: heap usage 92% — GC pauses increasing",
+                "log_message": "OOM warning: heap usage 92% — GC pauses increasing",
                 "root_cause_hint": "resource_exhaustion",
             },
         ),
     ]
+
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        service=service,
+        metadata=metadata,
+    )

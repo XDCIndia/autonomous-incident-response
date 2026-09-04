@@ -286,6 +286,88 @@ class DockerController:
                 logger.error("Failed to deploy %s: %s", config.service, exc)
                 return None
 
+    def _sync_exhaust_resources(
+        self,
+        service_name: str,
+        cpu_quota_pct: int,
+        workers: int,
+        duration_seconds: int,
+    ) -> dict[str, Any]:
+        """Genuinely pin the container's CPU — not a simulated flag.
+
+        Caps the container's overall CPU quota down to ``cpu_quota_pct`` % of
+        a core (via the same cgroup mechanism Docker itself uses for
+        ``--cpus``), then spawns ``workers`` detached CPU-burning processes
+        *inside* the container via ``docker exec``. Competing for that
+        artificially small quota is what makes the container's own request
+        handling (the health check, ``/pay``, etc.) visibly degrade — capping
+        the quota alone wouldn't do it, since an otherwise-idle container
+        never hits its quota ceiling.
+
+        Both effects revert on their own after ``duration_seconds`` (this
+        scenario has no real remediation hookup yet — the busy-loop
+        processes exit when their own deadline elapses, and a timer restores
+        the original CPU quota) — a shared demo host shouldn't stay crippled
+        indefinitely just because remediation didn't undo it.
+        """
+        container = self._sync_get_service_container(service_name)
+        if container is None:
+            return {"started": False, "reason": "container not found"}
+
+        with self._lock:
+            try:
+                container.reload()
+                host_config = container.attrs.get("HostConfig", {})
+                previous = {
+                    "cpu_quota": host_config.get("CpuQuota") or -1,
+                    "cpu_period": host_config.get("CpuPeriod") or 100_000,
+                }
+
+                period = 100_000  # Docker's default CFS accounting period (µs)
+                quota = max(1_000, int(period * cpu_quota_pct / 100))
+                container.update(cpu_quota=quota, cpu_period=period)
+
+                busy_loop = f"import time; end=time.time()+{duration_seconds}\nwhile time.time() < end: pass"
+                for _ in range(workers):
+                    container.exec_run(["python3", "-c", busy_loop], detach=True)
+
+                logger.info(
+                    "Exhausting resources on %s: capped to %d%% CPU, %d worker(s), %ds",
+                    service_name, cpu_quota_pct, workers, duration_seconds,
+                )
+            except DockerException as exc:
+                logger.error("Failed to exhaust resources for %s: %s", service_name, exc)
+                return {"started": False, "reason": str(exc)}
+
+        timer = threading.Timer(
+            duration_seconds, self._sync_restore_resources, args=(service_name, previous)
+        )
+        timer.daemon = True
+        timer.start()
+
+        return {
+            "started": True,
+            "cpu_quota_pct": cpu_quota_pct,
+            "workers": workers,
+            "duration_seconds": duration_seconds,
+        }
+
+    def _sync_restore_resources(self, service_name: str, previous: dict[str, Any]) -> bool:
+        container = self._sync_get_service_container(service_name)
+        if container is None:
+            return False
+        with self._lock:
+            try:
+                container.update(
+                    cpu_quota=previous.get("cpu_quota", -1),
+                    cpu_period=previous.get("cpu_period", 100_000),
+                )
+                logger.info("Restored normal CPU limits for %s", service_name)
+                return True
+            except DockerException as exc:
+                logger.error("Failed to restore CPU limits for %s: %s", service_name, exc)
+                return False
+
     def _sync_check_health(self, service_name: str) -> dict[str, Any]:
         info = self._sync_get_container_info(service_name)
         if info is None:
@@ -355,6 +437,22 @@ class DockerController:
 
     async def check_health(self, service_name: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._sync_check_health, service_name)
+
+    async def exhaust_resources(
+        self,
+        service_name: str,
+        *,
+        cpu_quota_pct: int = 25,
+        workers: int = 2,
+        duration_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Real CPU exhaustion — see ``_sync_exhaust_resources`` for how."""
+        return await asyncio.to_thread(
+            self._sync_exhaust_resources, service_name, cpu_quota_pct, workers, duration_seconds
+        )
+
+    async def restore_resources(self, service_name: str, previous: dict[str, Any]) -> bool:
+        return await asyncio.to_thread(self._sync_restore_resources, service_name, previous)
 
     async def wait_for_health(
         self,

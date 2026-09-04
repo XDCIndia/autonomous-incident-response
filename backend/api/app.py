@@ -158,7 +158,12 @@ async def inject_fault(request: FaultInjectionRequest):
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
 
-    from backend.simulator.scenarios import inject_bad_deployment, inject_dependency_outage, inject_database_failure
+    from backend.simulator.scenarios import (
+        inject_bad_deployment,
+        inject_dependency_outage,
+        inject_database_failure,
+        inject_resource_exhaustion,
+    )
 
     try:
         if request.scenario == "bad_deployment":
@@ -175,6 +180,18 @@ async def inject_fault(request: FaultInjectionRequest):
                     "previous_config": result.previous_config,
                     "bad_version": result.bad_version
                 }
+            }
+        elif request.scenario == "resource_exhaustion":
+            result = await inject_resource_exhaustion(
+                service=request.service_name,
+                docker_controller=docker_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
             }
         elif request.scenario == "dependency_outage":
             if toxiproxy_ctl is None:
@@ -285,8 +302,11 @@ async def trigger_incident(request: TriggerRequest):
     )
 
     # Inject signals based on scenario
-    # Note: inject_bad_deployment is async (uses async DockerController);
-    # the others are sync (use sync ToxiproxyClient or are pure mock).
+    # Note: inject_bad_deployment and inject_resource_exhaustion are async
+    # (use async DockerController); the others are sync (use sync
+    # ToxiproxyClient or are pure mock). None of these pass docker_ctl/
+    # toxiproxy_ctl here, so this endpoint stays mock-signal-only for all
+    # four scenarios — real injection is only wired up via /faults/inject.
     if request.scenario == "bad_deployment":
         result = await inject_bad_deployment(service=request.service_name)
     elif request.scenario == "database_failure":
@@ -294,7 +314,7 @@ async def trigger_incident(request: TriggerRequest):
     elif request.scenario == "dependency_outage":
         result = inject_dependency_outage(service=request.service_name)
     elif request.scenario == "resource_exhaustion":
-        result = inject_resource_exhaustion(service=request.service_name)
+        result = await inject_resource_exhaustion(service=request.service_name)
     else:
         raise HTTPException(
             status_code=400,
