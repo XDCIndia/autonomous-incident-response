@@ -206,10 +206,16 @@ class Storage:
         return Incident.model_validate(json.loads(row["data"]))
 
     async def list_incidents(self, limit: int = 50) -> list[Incident]:
-        """List recent incidents, newest first."""
+        """List recent incidents, newest first.
+
+        ``rowid DESC`` is the tiebreaker for incidents created within the
+        same microsecond (``created_at`` is only microsecond-precision), so
+        back-to-back saves always come back in insertion order instead of
+        in an arbitrary order.
+        """
         conn = self._require_conn()
         async with conn.execute(
-            "SELECT data FROM incidents ORDER BY created_at DESC LIMIT ?", (limit,)
+            "SELECT data FROM incidents ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
         ) as cursor:
             rows = await cursor.fetchall()
         return [Incident.model_validate(json.loads(row["data"])) for row in rows]
