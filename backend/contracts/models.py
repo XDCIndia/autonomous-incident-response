@@ -109,6 +109,17 @@ class Incident(BaseModel):
     service_name: str = "unknown"
     service_url: Optional[str] = None
 
+    # Where this incident came from — "simulator" (a scenario injected via
+    # /incidents/trigger or /faults/inject) or "url_monitor" (a real,
+    # user-registered MonitoredTarget genuinely failing its health checks).
+    # Downstream stages use this to decide what's safe to do automatically:
+    # a simulator incident targets our own docker-managed services, so real
+    # remediation/verification make sense; a url_monitor incident targets an
+    # arbitrary external URL we have no control-plane integration for, so
+    # remediation must stay recommendation-only (see VerificationInterface /
+    # OrchestratorNodes.remediate in backend/orchestrator/nodes.py).
+    source: str = "simulator"
+
     # State
     state: IncidentState = IncidentState.CREATED
     severity: Optional[SeverityLevel] = None
@@ -243,3 +254,36 @@ class PipelineResult(BaseModel):
     error: Optional[str] = None
     total_stages_completed: int = 0
     duration_seconds: float = 0.0
+
+
+class MonitoredTarget(BaseModel):
+    """A user-registered application URL the system actively health-checks.
+
+    When monitoring detects a genuine, sustained failure (see
+    backend/monitoring/url_monitor.py's deterministic consecutive-failure
+    policy), it creates a real Incident with source="url_monitor" and runs
+    it through the same orchestrator every simulator scenario uses.
+    """
+    id: str = Field(default_factory=_uuid)
+    name: str
+    url: str
+    monitoring_enabled: bool = True
+    health_status: str = "unknown"  # "unknown" | "healthy" | "unhealthy"
+    consecutive_failures: int = 0
+    last_checked_at: Optional[datetime] = None
+    last_status_code: Optional[int] = None
+    last_latency_ms: Optional[float] = None
+    last_error: Optional[str] = None
+    active_incident_id: Optional[str] = None
+    # True from the moment an incident is created for the CURRENT outage
+    # until the URL genuinely recovers (a successful health check) —
+    # independent of whether that incident has since reached a terminal
+    # state. This is what prevents re-arming mid-outage: url_monitor
+    # incidents can resolve to a terminal state in well under a second
+    # (recommendation-only remediation, single HTTP verification), so gating
+    # incident creation on active_incident_id alone would create a new
+    # incident on almost every monitor tick for the duration of one real
+    # outage. Only a genuine recovery clears this flag.
+    incident_reported: bool = False
+    created_at: datetime = Field(default_factory=_now)
+    updated_at: datetime = Field(default_factory=_now)

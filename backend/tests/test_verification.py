@@ -9,11 +9,14 @@ without touching Docker or the network.
 from __future__ import annotations
 
 import pytest
+from unittest.mock import AsyncMock
+
+import httpx
 
 import backend.simulator.health_checker as health_checker_module
-from backend.orchestrator.nodes import VerificationInterface
+from backend.orchestrator.nodes import OrchestratorNodes, VerificationInterface
 from backend.simulator.health_checker import VerificationResult as HealthCheckerResult
-from backend.contracts import Incident, RemediationRequest, RemediationResult
+from backend.contracts import Incident, RemediationRequest, RemediationResult, VerificationResult
 
 
 @pytest.fixture
@@ -175,3 +178,188 @@ class TestRealVerification:
         # on the fixture's remediation_result.
         assert result.verified is True
         assert result.checks_passed == 3
+
+
+class _FakeUrlResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
+class _FakeUrlAsyncClient:
+    def __init__(self, response: _FakeUrlResponse | None = None, raises: Exception | None = None):
+        self._response = response
+        self._raises = raises
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, *args, **kwargs):
+        if self._raises:
+            raise self._raises
+        return self._response
+
+
+class TestUrlMonitorVerification:
+    """url_monitor-sourced incidents verify against the real target URL
+    directly, not the docker/host-port logic — see issue #36."""
+
+    @pytest.fixture
+    def url_monitor_incident(self):
+        incident = Incident(
+            service_name="My App",
+            target_url="http://example.com",
+            source="url_monitor",
+        )
+        incident.remediation_request = RemediationRequest(
+            action="restart_service", target_service="My App"
+        )
+        incident.remediation_result = RemediationResult(action="restart_service", success=False)
+        return incident
+
+    @pytest.mark.asyncio
+    async def test_healthy_url_is_verified(self, monkeypatch, url_monitor_incident):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(_FakeUrlResponse(200)))
+
+        # No docker_ctl at all — url_monitor verification never needs one.
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is True
+        assert result.recovered_metrics["status_code"] == 200
+
+    @pytest.mark.asyncio
+    async def test_5xx_url_is_not_verified(self, monkeypatch, url_monitor_incident):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(_FakeUrlResponse(503)))
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is False
+        assert result.recovered_metrics["status_code"] == 503
+
+    @pytest.mark.asyncio
+    async def test_connection_error_is_not_verified_and_does_not_crash(self, monkeypatch, url_monitor_incident):
+        monkeypatch.setattr(
+            httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(raises=ConnectionError("refused"))
+        )
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is False
+        assert "refused" in result.message
+
+    @pytest.mark.asyncio
+    async def test_simulator_incident_with_target_url_unset_uses_docker_path(self, monkeypatch):
+        # source defaults to "simulator" — even if target_url happened to be
+        # set, only source == "url_monitor" takes the URL-verification path.
+        incident = Incident(service_name="payment-service", target_url="http://example.com")
+        incident.remediation_result = RemediationResult(action="restart_service", success=True)
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(incident)
+
+        # Falls to the no-docker stub, not the URL check — proven by the
+        # stub's distinctive fixed metrics shape.
+        assert result.recovered_metrics.get("error_rate") is not None
+
+
+class _PoisonVerifier:
+    """Stands in for ServiceHealthVerifier (or any future verifier) — its
+    verify() must NEVER be called for a url_monitor incident, regardless of
+    what self.verification is configured to. Calling it fails the test
+    immediately rather than silently producing a wrong-but-plausible result,
+    which is exactly how the original bug slipped past every other test:
+    VerificationInterface's own branch is correct in isolation, but nothing
+    enforced that OrchestratorNodes.verify() would actually reach it instead
+    of whatever real_env=auto had swapped in."""
+
+    async def verify(self, incident: Incident) -> HealthCheckerResult:
+        raise AssertionError(
+            "ServiceHealthVerifier-equivalent.verify() was called for a "
+            "url_monitor incident — the safety boundary was bypassed"
+        )
+
+
+def _make_orchestrator_nodes(verification) -> OrchestratorNodes:
+    """Minimal OrchestratorNodes for testing the verify() node in isolation
+    — only storage/event_bus (used by _emit) and verification matter here."""
+    return OrchestratorNodes(
+        log_investigator=None,
+        metric_investigator=None,
+        arbiter=None,
+        severity_agent=None,
+        reporter=None,
+        remediation_engine=None,
+        verification=verification,
+        storage=AsyncMock(),
+        event_bus=AsyncMock(),
+        approval_events={},
+        approval_decisions={},
+    )
+
+
+class TestUrlMonitorVerificationBypassesConfiguredVerifier:
+    """Reproduces the exact production scenario from the validation report:
+    real_env=auto detects Docker, so the orchestrator's self.verification is
+    a real (here: poisoned) ServiceHealthVerifier — a url_monitor incident
+    must still verify target_url directly via the node-level branch in
+    OrchestratorNodes.verify(), never reaching that configured verifier."""
+
+    @pytest.fixture
+    def url_monitor_state(self):
+        incident = Incident(
+            service_name="My App",
+            target_url="http://example.com",
+            source="url_monitor",
+        )
+        incident.remediation_request = RemediationRequest(action="restart_service", target_service="My App")
+        incident.remediation_result = RemediationResult(action="restart_service", success=False)
+        return {"incident": incident}
+
+    @pytest.mark.asyncio
+    async def test_healthy_target_url_verifies_true_without_touching_configured_verifier(
+        self, monkeypatch, url_monitor_state
+    ):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(_FakeUrlResponse(200)))
+
+        nodes = _make_orchestrator_nodes(_PoisonVerifier())
+        result_state = await nodes.verify(url_monitor_state)
+
+        assert result_state["verification_result"].verified is True
+        assert result_state["incident"].verification_result.verified is True
+
+    @pytest.mark.asyncio
+    async def test_failing_target_url_verifies_false_without_touching_configured_verifier(
+        self, monkeypatch, url_monitor_state
+    ):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(_FakeUrlResponse(500)))
+
+        nodes = _make_orchestrator_nodes(_PoisonVerifier())
+        result_state = await nodes.verify(url_monitor_state)
+
+        assert result_state["verification_result"].verified is False
+
+    @pytest.mark.asyncio
+    async def test_simulator_incident_still_uses_the_configured_verifier(self, monkeypatch):
+        """Control case — proves the branch is source-specific, not a
+        blanket bypass: a simulator incident must still reach whatever
+        verifier is configured."""
+        incident = Incident(service_name="payment-service")
+        incident.remediation_request = RemediationRequest(action="restart_service", target_service="payment-service")
+        incident.remediation_result = RemediationResult(action="restart_service", success=True)
+
+        class RecordingVerifier:
+            called = False
+
+            async def verify(self, incident):
+                RecordingVerifier.called = True
+                return VerificationResult(verified=True, checks_passed=1, checks_total=1, message="ok")
+
+        nodes = _make_orchestrator_nodes(RecordingVerifier())
+        await nodes.verify({"incident": incident})
+
+        assert RecordingVerifier.called is True

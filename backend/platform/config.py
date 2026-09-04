@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # must not be able to call them from a browser (issue #31).
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # Real URL monitoring (issue #36): how often the background loop checks
+    # every monitoring_enabled MonitoredTarget, and how many CONSECUTIVE
+    # failed checks before it creates a real Incident. Deliberately
+    # deterministic, not LLM-based — see backend/monitoring/url_monitor.py.
+    url_monitor_interval_seconds: float = 15.0
+    url_monitor_failure_threshold: int = 3
+
     # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
     # and isn't backend config — reject only unknown *backend* keys, not those.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
