@@ -20,6 +20,7 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "websockets>=13.0",
     "langgraph>=0.2.0",
+    "docker>=7.0.0",
 ]
 
 [project.optional-dependencies]

@@ -4,42 +4,131 @@ Each function returns a list of TelemetryEvent signals that the pipeline
 can process. The signals contain hints but NOT the answer — the root cause
 must be determined by the investigation/arbiter pipeline.
 
-Person 3 implements full fault scenarios here.
-For the foundation, one scenario is fully implemented; others are stubs.
+Real Docker fault injection:
+    When a ``DockerController`` is provided, ``inject_bad_deployment``
+    also performs actual container replacement (healthy → bad).  The full
+    container configuration is serialized into the telemetry metadata so
+    that the remediation engine can restore it exactly.
+
+Mock mode (no controller):
+    Returns deterministic TelemetryEvent signals only — unchanged from
+    the original foundation implementation.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from backend.contracts import TelemetryEvent
 
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import ContainerConfig, DockerController
+    from backend.simulator.toxiproxy_client import ToxiproxyClient
 
-def inject_bad_deployment(
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Result type for real fault injection
+# ---------------------------------------------------------------------------
+
+class FaultInjectionResult:
+    """Bundles telemetry signals with Docker-side metadata."""
+
+    def __init__(
+        self,
+        signals: list[TelemetryEvent],
+        *,
+        docker_performed: bool = False,
+        previous_config: dict[str, Any] | None = None,
+        bad_version: str = "",
+        service: str = "",
+        metadata: dict[str, Any] | None = None,
+    ):
+        self.signals = signals
+        self.docker_performed = docker_performed
+        self.previous_config = previous_config
+        self.bad_version = bad_version
+        self.service = service
+        self.metadata = metadata or {}
+
+
+# ---------------------------------------------------------------------------
+# Bad Deployment
+# ---------------------------------------------------------------------------
+
+async def inject_bad_deployment(
     service: str = "payment-service",
     version: str = "v2.4.1",
     deployed_seconds_ago: float = 30.0,
-) -> list[TelemetryEvent]:
+    docker_controller: DockerController | None = None,
+) -> FaultInjectionResult:
     """Simulate a bad deployment — new version causes errors and latency spike.
 
-    Signals are ordered chronologically. The deploy event comes FIRST,
-    then the errors/latency follow.
+    **Mock mode** (``docker_controller is None``):
+        Returns deterministic telemetry signals only.
+
+    **Real mode** (``docker_controller`` provided):
+        1. Saves the complete configuration of the currently-healthy container.
+        2. Removes the healthy container.
+        3. Starts the same image with ``FORCE_UNHEALTHY=true``.
+        4. Returns telemetry signals *plus* the saved config for rollback.
 
     Returns:
-        List of TelemetryEvent signals representing the incident.
+        ``FaultInjectionResult`` containing signals and optional Docker metadata.
     """
     now = datetime.now(timezone.utc)
+
+    # ── Docker fault injection ──────────────────────────────────────────
+    previous_config_dict: dict[str, Any] | None = None
+    docker_performed = False
+
+    if docker_controller is not None:
+        saved = await docker_controller.save_container_config(service)
+        if saved is None:
+            logger.error("Cannot inject bad deployment: no container found for %s", service)
+        else:
+            previous_config_dict = dataclasses.asdict(saved)
+            logger.info(
+                "Saved config for %s (image=%s, version=%s)",
+                service, saved.image, saved.version,
+            )
+            # Remove healthy container and start the bad one
+            await docker_controller.remove_container(service, force=True)
+            bad_container = await docker_controller.deploy_version(
+                saved,
+                version_override=version,
+                env_overrides={"FORCE_UNHEALTHY": "true", "SERVICE_VERSION": version},
+            )
+            if bad_container is not None:
+                docker_performed = True
+                logger.info("Bad deployment injected: %s → %s", service, version)
+            else:
+                logger.error("Failed to start bad version for %s", service)
+
+    # ── Telemetry signals (always generated) ────────────────────────────
+    deploy_metadata: dict[str, Any] = {
+        "log_message": f"Deployment {version} rolled out to {service}",
+        "version": version,
+        "deployed_seconds_ago": deployed_seconds_ago,
+    }
+    # Embed rollback config in the deploy event so the pipeline can pass
+    # it through to the remediation stage.
+    if previous_config_dict is not None:
+        deploy_metadata["previous_config"] = previous_config_dict
+        deploy_metadata["docker_performed"] = True
+
     signals = [
         TelemetryEvent(
             timestamp=now,
             source=service,
             event_type="deploy",
             value=version,
-            metadata={
-                "log_message": f"Deployment {version} rolled out to {service}",
-                "version": version,
-                "deployed_seconds_ago": deployed_seconds_ago,
-            },
+            metadata=deploy_metadata,
         ),
         TelemetryEvent(
             timestamp=now,
@@ -73,25 +162,68 @@ def inject_bad_deployment(
             },
         ),
     ]
-    return signals
+
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        previous_config=previous_config_dict,
+        bad_version=version,
+        service=service,
+    )
 
 
 def inject_database_failure(
-    service: str = "inventory-service",
-) -> list[TelemetryEvent]:
+    service: str = "payment-service",
+    database: str = "postgres-main",
+    toxiproxy_client: ToxiproxyClient | None = None,
+) -> FaultInjectionResult:
     """Simulate database connection pool exhaustion.
 
     Returns signals showing connection timeouts and pool exhaustion.
     """
     now = datetime.now(timezone.utc)
-    return [
+    
+    docker_performed = False
+    metadata = {}
+    
+    if toxiproxy_client:
+        proxy_name = "payment-db-proxy"
+        # Inject timeout toxic
+        toxic = toxiproxy_client.add_toxic(
+            proxy_name=proxy_name,
+            toxic_name="db_timeout",
+            toxic_type="timeout",
+            attributes={"timeout": 30000}
+        )
+        if toxic:
+            docker_performed = True
+            metadata = {
+                "proxy_name": proxy_name,
+                "database": database,
+                "toxic_name": "db_timeout",
+                "toxic_type": "timeout",
+            }
+            logger.info("Injected database failure on %s", proxy_name)
+    
+    signals = [
+        TelemetryEvent(
+            timestamp=now,
+            source=database,
+            event_type="active_connections",
+            value=100.0,  # e.g., 100% of pool size
+            metadata={
+                "log_message": "WARNING: Connection pool exhausted, refusing new connections",
+                "root_cause_hint": "database_failure",
+                **metadata
+            },
+        ),
         TelemetryEvent(
             timestamp=now,
             source=service,
             event_type="error_rate",
-            value=0.60,
+            value=0.55,
             metadata={
-                "log_message": f"Database connection pool exhausted on {service}",
+                "log_message": f"FATAL: Database connection timeout connecting to {database}",
                 "root_cause_hint": "database_failure",
             },
         ),
@@ -116,19 +248,52 @@ def inject_database_failure(
             },
         ),
     ]
+    
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        service=service,
+        metadata=metadata,
+    )
 
 
 def inject_dependency_outage(
     service: str = "payment-service",
-    dependency: str = "external-gateway",
-) -> list[TelemetryEvent]:
+    dependency: str = "rpc-service-primary",
+    toxiproxy_client: ToxiproxyClient | None = None,
+) -> FaultInjectionResult:
     """Simulate upstream dependency outage — external gateway stops responding.
 
     The log investigator may initially blame payment-service,
     but the metric investigator should correlate with gateway timeouts.
     """
     now = datetime.now(timezone.utc)
-    return [
+    
+    docker_performed = False
+    metadata = {}
+    
+    if toxiproxy_client:
+        proxy_name = "payment-rpc-proxy"
+        # Inject timeout toxic
+        toxic = toxiproxy_client.add_toxic(
+            proxy_name=proxy_name,
+            toxic_name="outage_timeout",
+            toxic_type="timeout",
+            attributes={"timeout": 30000}
+        )
+        if toxic:
+            docker_performed = True
+            metadata = {
+                "proxy_name": proxy_name,
+                "dependency": dependency,
+                "toxic_name": "outage_timeout",
+                "toxic_type": "timeout",
+                "previous_upstream": "rpc-service-primary:5000",
+                "secondary_upstream": "rpc-service-secondary:5000"
+            }
+            logger.info("Injected dependency outage on %s", proxy_name)
+    
+    signals = [
         TelemetryEvent(
             timestamp=now,
             source=service,
@@ -137,6 +302,7 @@ def inject_dependency_outage(
             metadata={
                 "log_message": f"Timeout calling {dependency} from {service}",
                 "root_cause_hint": "dependency_outage",
+                **metadata
             },
         ),
         TelemetryEvent(
@@ -160,6 +326,13 @@ def inject_dependency_outage(
             },
         ),
     ]
+    
+    return FaultInjectionResult(
+        signals=signals,
+        docker_performed=docker_performed,
+        service=service,
+        metadata=metadata,
+    )
 
 
 def inject_resource_exhaustion(
