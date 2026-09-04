@@ -1,7 +1,14 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import { LiveIncident } from "@/components/LiveIncident";
+import { PostMortem } from "@/components/PostMortem";
+import { canonicalReport, findIncident } from "@/lib/incidents";
+import type { PostMortemReport } from "@/lib/types";
+
+/* ── upstream API types (optional enrichment when backend is available) ── */
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
@@ -41,7 +48,7 @@ interface ArbiterResult {
   contributing_factors: string[];
 }
 
-interface Incident {
+interface ApiIncident {
   id: string;
   service_name: string;
   state: string;
@@ -72,273 +79,190 @@ interface SimilarIncident {
   similarity: number;
 }
 
+/** Optional enrichment passed to PostMortem when the real backend is reachable */
+export interface ApiEnrichment {
+  incident: ApiIncident | null;
+  timeline: TimelineEvent[];
+  connected: boolean;
+  similarIncidents: SimilarIncident[] | null;
+  similarLoading: boolean;
+}
+
+type View = "loading" | "live" | "report";
+
+/**
+ * Incident deep-dive.
+ *  - /incidents/live            → the live command center (simulation entry point)
+ *  - /incidents/<real id>       → stored post-mortem report, or the canonical demo report
+ *
+ * When NEXT_PUBLIC_API_URL points to a running backend, the page also
+ * fetches the real incident record over REST + WebSocket and forwards that
+ * data to the report view for display alongside the mock narrative.
+ */
 export default function IncidentPage() {
   const params = useParams();
-  const id = params.id as string;
+  const id = (params.id as string) ?? "";
+  const [view, setView] = useState<View>("loading");
+  const [report, setReport] = useState<PostMortemReport | null>(null);
+  const [fallback, setFallback] = useState(false);
 
-  const [incident, setIncident] = useState<Incident | null>(null);
+  /* upstream: live API data (optional) */
+  const [apiIncident, setApiIncident] = useState<ApiIncident | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [similarIncidents, setSimilarIncidents] = useState<SimilarIncident[] | null>(null);
   const [similarLoading, setSimilarLoading] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Fetch incident details
+  /* resolve which view to show */
   useEffect(() => {
-    fetch(`${API_URL}/incidents/${id}`)
-      .then((res) => res.json())
-      .then(setIncident)
-      .catch(console.error);
+    if (id === "live") {
+      setView("live");
+      return;
+    }
+    const found = findIncident(id);
+    if (found) {
+      setReport(found);
+      setFallback(false);
+      setView("report");
+    } else {
+      setReport(canonicalReport());
+      setFallback(true);
+      setView("report");
+    }
   }, [id]);
 
-  // WebSocket for live timeline
+  /* upstream: fetch real incident details when backend is available */
   useEffect(() => {
-    const ws = new WebSocket(`${WS_URL}/ws/incidents/${id}`);
+    if (id === "live" || !id) return;
+
+    fetch(`${API_URL}/incidents/${id}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((data: ApiIncident) => setApiIncident(data))
+      .catch(() => {
+        /* backend not reachable — mock report already shown, nothing to do */
+      });
+  }, [id]);
+
+  /* upstream: WebSocket for live timeline */
+  useEffect(() => {
+    if (id === "live" || !id) return;
+
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`${WS_URL}/ws/incidents/${id}`);
+    } catch {
+      return; // WS URL malformed — skip silently
+    }
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      setConnected(true);
-      console.log("WebSocket connected");
-    };
-
+    ws.onopen = () => setConnected(true);
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "ping") return; // keepalive
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "ping") return; // keepalive
 
-      setTimeline((prev) => {
-        // Avoid duplicates
-        if (prev.some((e) => e.id === data.id)) return prev;
-        return [...prev, data];
-      });
+        setTimeline((prev) =>
+          prev.some((e) => e.id === data.id) ? prev : [...prev, data]
+        );
 
-      // Refresh incident details on new events
-      fetch(`${API_URL}/incidents/${id}`)
-        .then((res) => res.json())
-        .then(setIncident)
-        .catch(console.error);
+        /* refresh incident details on new events */
+        fetch(`${API_URL}/incidents/${id}`)
+          .then((res) => res.json())
+          .then((d: ApiIncident) => setApiIncident(d))
+          .catch(() => {});
+      } catch {
+        /* non-JSON frame — ignore */
+      }
     };
-
-    ws.onclose = () => {
-      setConnected(false);
-      console.log("WebSocket disconnected");
-    };
+    ws.onclose = () => setConnected(false);
 
     return () => ws.close();
   }, [id]);
 
-  // Once the report lands (root cause is final), look up similar past
-  // incidents from the knowledge base — keyed on service+root_cause rather
-  // than the whole `incident` object so it doesn't re-fetch on every
-  // WebSocket-triggered refresh once the report itself hasn't changed.
-  const reportRootCause = incident?.report?.root_cause;
+  /* upstream: knowledge-base similar-incident search once root cause is known */
+  const reportRootCause = apiIncident?.report?.root_cause;
   useEffect(() => {
-    if (!incident || !reportRootCause) return;
+    if (!apiIncident || !reportRootCause) return;
 
     setSimilarLoading(true);
-    const query = `${incident.service_name} ${reportRootCause}`;
+    const query = `${apiIncident.service_name} ${reportRootCause}`;
     fetch(`${API_URL}/knowledge-base/search?query=${encodeURIComponent(query)}&top_k=3`)
       .then((res) => res.json())
       .then((data) => setSimilarIncidents(data.results ?? []))
-      .catch(console.error)
+      .catch(() => setSimilarIncidents(null))
       .finally(() => setSimilarLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [incident?.service_name, reportRootCause]);
+  }, [apiIncident?.service_name, reportRootCause]);
 
-  if (!incident) {
-    return <p>Loading incident...</p>;
+  if (view === "live") {
+    return <LiveIncident />;
   }
 
-  return (
-    <div>
-      <a href="/" style={{ color: "#0066cc", marginBottom: "16px", display: "inline-block" }}>
-        ← Back to Dashboard
-      </a>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px", marginBottom: "32px" }}>
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>Incident Details</h3>
-          <dl style={{ margin: 0 }}>
-            <dt style={{ fontWeight: "bold" }}>ID</dt>
-            <dd>{incident.id}</dd>
-            <dt style={{ fontWeight: "bold" }}>Service</dt>
-            <dd>{incident.service_name}</dd>
-            <dt style={{ fontWeight: "bold" }}>State</dt>
-            <dd>
-              <span style={{
-                padding: "2px 8px",
-                borderRadius: "4px",
-                background: incident.state === "resolved" ? "#d4edda" : incident.state === "failed" ? "#f8d7da" : "#fff3cd",
-              }}>
-                {incident.state}
-              </span>
-            </dd>
-            <dt style={{ fontWeight: "bold" }}>Severity</dt>
-            <dd>{incident.severity || "—"}</dd>
-            <dt style={{ fontWeight: "bold" }}>Stage</dt>
-            <dd>{incident.current_stage || "—"}</dd>
-          </dl>
-        </div>
-
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>
-            Live Timeline
-            <span style={{ fontSize: "12px", color: connected ? "green" : "red", marginLeft: "8px" }}>
-              {connected ? "● Connected" : "○ Disconnected"}
-            </span>
-          </h3>
-          <div style={{ maxHeight: "300px", overflowY: "auto" }}>
-            {timeline.length === 0 ? (
-              <p style={{ color: "#666" }}>Waiting for events...</p>
-            ) : (
-              timeline.map((event) => (
-                <div key={event.id} style={{
-                  padding: "8px",
-                  marginBottom: "4px",
-                  background: event.status === "failed" ? "#fee" : event.status === "started" ? "#fff3cd" : "#f0f0f0",
-                  borderRadius: "4px",
-                  fontSize: "13px",
-                }}>
-                  <strong>{event.stage}</strong> — {event.message}
-                  <br />
-                  <small style={{ color: "#666" }}>
-                    {new Date(event.timestamp).toLocaleTimeString()} · {event.status}
-                  </small>
-                </div>
-              ))
-            )}
-          </div>
+  if (view === "loading" || !report) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-[var(--color-bg-base)]">
+        <div className="text-center space-y-4">
+          <div className="mx-auto h-8 w-8 rounded-full border-2 border-[var(--color-border-default)] border-t-[var(--color-accent-cyan)] animate-spin" />
+          <p className="font-mono text-[11px] tracking-[0.14em] text-[var(--color-text-muted)]">
+            loading incident report
+          </p>
         </div>
       </div>
+    );
+  }
 
-      {(incident.log_result || incident.metric_result) && (
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px", marginBottom: "32px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>Investigation</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
-            <div>
-              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
-                Log Investigator
-              </h4>
-              {incident.log_result ? (
-                <dl style={{ margin: 0 }}>
-                  <dt style={{ fontWeight: "bold" }}>Hypothesis</dt>
-                  <dd>{incident.log_result.hypothesis}</dd>
-                  <dt style={{ fontWeight: "bold" }}>Suggested Root Cause</dt>
-                  <dd>{incident.log_result.suggested_root_cause}</dd>
-                  <dt style={{ fontWeight: "bold" }}>Confidence</dt>
-                  <dd>{(incident.log_result.confidence * 100).toFixed(0)}%</dd>
-                </dl>
-              ) : (
-                <p style={{ color: "#666" }}>No log evidence.</p>
-              )}
-            </div>
-            <div>
-              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
-                Metric Investigator
-              </h4>
-              {incident.metric_result ? (
-                <dl style={{ margin: 0 }}>
-                  <dt style={{ fontWeight: "bold" }}>Hypothesis</dt>
-                  <dd>{incident.metric_result.hypothesis}</dd>
-                  <dt style={{ fontWeight: "bold" }}>Suggested Root Cause</dt>
-                  <dd>{incident.metric_result.suggested_root_cause}</dd>
-                  <dt style={{ fontWeight: "bold" }}>Confidence</dt>
-                  <dd>{(incident.metric_result.confidence * 100).toFixed(0)}%</dd>
-                </dl>
-              ) : (
-                <p style={{ color: "#666" }}>No metric evidence.</p>
-              )}
-            </div>
+  const enrichment: ApiEnrichment = {
+    incident: apiIncident,
+    timeline,
+    connected,
+    similarIncidents,
+    similarLoading,
+  };
+
+  return (
+    <div className="min-h-screen">
+      {/* slim brand bar */}
+      <header className="sticky top-0 z-40 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]/85 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5">
+          <Link
+            href="/"
+            className="label-micro shrink-0 text-[var(--color-text-muted)] transition-colors duration-200 hover:text-[var(--color-text-primary)]"
+          >
+            ← OVERVIEW
+          </Link>
+          <div className="mx-1 hidden h-5 w-px bg-[var(--color-border-subtle)] sm:block" />
+          <div className="relative grid h-8 w-8 shrink-0 place-items-center">
+            <div className="absolute inset-0 rounded-full border border-[rgba(54,215,232,0.2)]" />
+            <div className="absolute inset-[3px] rounded-full border border-dashed border-[rgba(255,77,103,0.25)]" />
+            <div className="h-2.5 w-2.5 rounded-full bg-[var(--color-accent-red)] opacity-80" />
           </div>
-
-          {incident.arbiter_result && (
-            <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #eee" }}>
-              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
-                Arbiter
-              </h4>
-              {incident.arbiter_result.conflict_description && (
-                <div
-                  style={{
-                    padding: "10px 12px",
-                    marginBottom: "10px",
-                    background: "#fff3cd",
-                    border: "1px solid #ffe69c",
-                    borderRadius: "6px",
-                    fontSize: "13px",
-                  }}
-                >
-                  <strong>⚠ Conflict:</strong> {incident.arbiter_result.conflict_description}
-                </div>
-              )}
-              <dl style={{ margin: 0 }}>
-                <dt style={{ fontWeight: "bold" }}>Merged Hypothesis</dt>
-                <dd>{incident.arbiter_result.merged_hypothesis}</dd>
-                <dt style={{ fontWeight: "bold" }}>Root Cause</dt>
-                <dd>{incident.arbiter_result.root_cause}</dd>
-                <dt style={{ fontWeight: "bold" }}>Confidence</dt>
-                <dd>{(incident.arbiter_result.confidence * 100).toFixed(0)}%</dd>
-                {incident.arbiter_result.contributing_factors.length > 0 && (
-                  <>
-                    <dt style={{ fontWeight: "bold" }}>Contributing Factors</dt>
-                    <dd>{incident.arbiter_result.contributing_factors.join(", ")}</dd>
-                  </>
-                )}
-              </dl>
-            </div>
+          <div className="leading-tight">
+            <span className="text-[14px] font-semibold tracking-[0.1em] text-[var(--color-text-primary)]">SYSTEM BACHAO</span>
+            <span className="label-micro ml-3 text-[var(--color-text-faint)]">post-incident report</span>
+          </div>
+          {connected && (
+            <span className="ml-2 hidden items-center gap-1.5 sm:flex">
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-status-healthy)]" />
+              <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--color-status-healthy)]">LIVE</span>
+            </span>
           )}
+          <span className="ml-auto font-mono text-[11px] tracking-[0.1em] text-[var(--color-text-muted)]">{report.id}</span>
+        </div>
+      </header>
+
+      {fallback && (
+        <div className="border-b border-[rgba(245,184,75,0.15)] bg-[rgba(245,184,75,0.03)]">
+          <p className="mx-auto max-w-[1280px] px-4 py-2 font-mono text-[10px] tracking-[0.06em] text-[var(--color-accent-amber)] opacity-80">
+            incident {id} was not simulated this session — showing the canonical demo incident {report.id}
+          </p>
         </div>
       )}
 
-      {incident.report && (
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>Incident Report</h3>
-          <dl style={{ margin: 0 }}>
-            <dt style={{ fontWeight: "bold" }}>Root Cause</dt>
-            <dd>{incident.report.root_cause}</dd>
-            <dt style={{ fontWeight: "bold" }}>Impact</dt>
-            <dd>{incident.report.impact}</dd>
-            <dt style={{ fontWeight: "bold" }}>Remediation</dt>
-            <dd>{incident.report.remediation_action}</dd>
-            <dt style={{ fontWeight: "bold" }}>Confidence</dt>
-            <dd>{(incident.report.confidence * 100).toFixed(0)}%</dd>
-            <dt style={{ fontWeight: "bold" }}>Prevention</dt>
-            <dd>{incident.report.prevention}</dd>
-          </dl>
-        </div>
-      )}
-
-      {incident.report && (
-        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px", marginTop: "24px" }}>
-          <h3 style={{ margin: "0 0 12px" }}>Similar Past Incidents</h3>
-          {similarLoading ? (
-            <p style={{ color: "#666" }}>Searching knowledge base...</p>
-          ) : !similarIncidents || similarIncidents.length === 0 ? (
-            <p style={{ color: "#666" }}>No similar past incidents found.</p>
-          ) : (
-            similarIncidents.map((match) => (
-              <div
-                key={match.id}
-                style={{
-                  padding: "10px 12px",
-                  marginBottom: "8px",
-                  background: "#f8f9fa",
-                  border: "1px solid #eee",
-                  borderRadius: "6px",
-                  fontSize: "13px",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-                  <strong>
-                    {match.service} — {match.root_cause}
-                  </strong>
-                  <span style={{ color: "#666" }}>{(match.similarity * 100).toFixed(0)}% match</span>
-                </div>
-                <p style={{ margin: "0 0 4px" }}>{match.description}</p>
-                <small style={{ color: "#666" }}>Resolved via: {match.resolved_via}</small>
-              </div>
-            ))
-          )}
-        </div>
-      )}
+      <PostMortem report={report} enrichment={enrichment} />
     </div>
   );
 }

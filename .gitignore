@@ -40,6 +40,7 @@ Thumbs.db
 node_modules/
 .next/
 out/
+*.tsbuildinfo
 
 # Testing
 htmlcov/
