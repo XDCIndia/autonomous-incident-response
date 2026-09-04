@@ -28,15 +28,32 @@ def live_server(tmp_path_factory):
     port = _free_port()
     workdir = tmp_path_factory.mktemp("live_server")
     # This file exercises concurrency/persistence against a *mock* pipeline
-    # (e.g. resource_exhaustion auto-resolves in-memory).  Pin REAL_ENV=off so
-    # the spawned backend never auto-wires the real Docker/Toxiproxy env just
-    # because the IRAS stack happens to be running (auto mode), which would
-    # slow the load test with real docker calls and escalate mock-remediated
-    # incidents.
+    # against synthetic service names (e.g. "load-svc-N") that don't
+    # correspond to actual containers — it doesn't stand up the
+    # docker-compose service stack. Two independent real-env gates need to
+    # be suppressed together, since neither alone covers both code paths:
+    #   - REAL_ENV=off stops configure_orchestrator() from swapping in the
+    #     real RemediationEngine/ServiceHealthVerifier (see backend/api/app.py
+    #     _ensure_real_orchestrator()).
+    #   - DOCKER_HOST pointed at a nonexistent socket stops DockerController's
+    #     startup ping() from succeeding, so get_orchestrator(docker_ctl=...)
+    #     (see backend/orchestrator/__init__.py) falls back to the
+    #     verification stage's no-Docker stub too.
+    # Without both, a real Docker daemon happening to be reachable on this
+    # machine would make either path do real (but unhelpful, since these
+    # services don't exist) health checks, and load-test incidents would
+    # never resolve.
     env = {
         **os.environ,
         "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db",
         "REAL_ENV": "off",
+        "DOCKER_HOST": "unix:///nonexistent/docker.sock",
+        # Likewise blank any LLM provider keys from the local `.env` (this
+        # suite tests HTTP/concurrency, not LLM quality/latency) so the
+        # server resolves incidents with the deterministic mock agents
+        # instead of making real, slow/network-dependent LLM API calls.
+        "ANTHROPIC_API_KEY": "",
+        "OPENAI_API_KEY": "",
     }
 
     proc = subprocess.Popen(
