@@ -20,13 +20,26 @@ from backend.platform.events import get_event_bus
 
 
 @pytest.fixture(autouse=True)
-async def reset_storage():
+async def reset_storage(monkeypatch):
     """Give each test a fresh in-memory SQLite-backed Storage singleton.
 
     The routes under test call the module-level `get_storage()` singleton,
     so we swap it out directly rather than reaching into private attributes
     of the old in-memory mock (which no longer exist on the real Storage).
+
+    Also blanks any LLM provider keys from the local `.env` for the duration
+    of the test: this suite asserts deterministic severity/approval behavior
+    that depends on the mock agents' keyword-based root-cause detection —
+    IncidentOrchestrator() defaults to the real LLM-backed agents whenever a
+    key is configured, which would make these tests non-deterministic (and
+    make real, paid API calls) if a developer's `.env` has keys set.
     """
+    import backend.platform.config as config_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    config_module._settings = None
+
     storage = Storage(db_path=":memory:")
     await storage.init_db()
     storage_module._storage = storage
@@ -34,6 +47,7 @@ async def reset_storage():
     await storage.close()
     storage_module._storage = None
     orchestrator_module._orchestrator = None
+    config_module._settings = None
 
 
 # Scenarios that produce P1/P2 severity (require approval)

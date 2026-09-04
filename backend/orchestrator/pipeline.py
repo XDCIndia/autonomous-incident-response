@@ -26,6 +26,7 @@ from backend.agents.base import (
     Reporter,
     SeverityAgent,
 )
+from backend.agents.llm_agents import LLMArbiter, LLMLogInvestigator, LLMMetricInvestigator
 from backend.agents.mock_agents import (
     MockArbiter,
     MockLogInvestigator,
@@ -48,11 +49,25 @@ from backend.remediation.actions import RemediationEngine
 logger = logging.getLogger(__name__)
 
 
+def _llm_configured() -> bool:
+    """True if at least one LLM provider has a configured API key.
+
+    Gates whether the orchestrator defaults to the real LLM-backed
+    investigators/arbiter or the deterministic mocks — mirrors the fallback
+    LLMClient itself already does per-provider, just one level up so CI/tests
+    with no keys set keep getting fully deterministic behavior.
+    """
+    settings = get_settings()
+    return bool(settings.anthropic_api_key or settings.openai_api_key)
+
+
 class IncidentOrchestrator:
     """Orchestrates the full incident response pipeline via LangGraph.
 
     Supports dependency injection for all agents and services.
-    Falls back to mock implementations when dependencies are not provided.
+    When dependencies are not provided, defaults to the real LLM-backed
+    investigators/arbiter if a provider API key is configured, otherwise the
+    deterministic mocks.
 
     Usage:
         orchestrator = IncidentOrchestrator()
@@ -76,10 +91,18 @@ class IncidentOrchestrator:
         event_bus: EventBus | None = None,
         docker_ctl: Optional["DockerController"] = None,
     ):
-        # Injected dependencies (with mock defaults)
-        self.log_investigator = log_investigator or MockLogInvestigator()
-        self.metric_investigator = metric_investigator or MockMetricInvestigator()
-        self.arbiter = arbiter or MockArbiter()
+        # Injected dependencies — default to the real LLM-backed agents when a
+        # provider key is configured, otherwise the deterministic mocks (also
+        # what LLMLogInvestigator/LLMMetricInvestigator/LLMArbiter themselves
+        # fall back to internally if the LLM response can't be parsed).
+        llm_ready = _llm_configured()
+        self.log_investigator = log_investigator or (
+            LLMLogInvestigator() if llm_ready else MockLogInvestigator()
+        )
+        self.metric_investigator = metric_investigator or (
+            LLMMetricInvestigator() if llm_ready else MockMetricInvestigator()
+        )
+        self.arbiter = arbiter or (LLMArbiter() if llm_ready else MockArbiter())
         self.severity_agent = severity_agent or MockSeverityAgent()
         self.reporter = reporter or MockReporter()
         self.remediation_engine = remediation_engine or RemediationEngine()

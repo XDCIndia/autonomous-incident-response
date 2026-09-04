@@ -23,6 +23,21 @@ services:
     depends_on:
       payment-service:
         condition: service_healthy
+      # These four don't define a healthcheck block, so Compose only
+      # supports waiting for "started" on them (condition: service_healthy
+      # is a validation error without one) — still enough to fix the actual
+      # bug: on a cold `docker-compose up`, the backend's lifespan pre-creates
+      # Toxiproxy proxies pointing at rpc-service-primary/db-service before
+      # any of these three containers exist yet, which fails silently (only
+      # a logger.warning) and leaves those proxies missing until a restart.
+      toxiproxy:
+        condition: service_started
+      db-service:
+        condition: service_started
+      rpc-service-primary:
+        condition: service_started
+      rpc-service-secondary:
+        condition: service_started
 
   frontend:
     build:

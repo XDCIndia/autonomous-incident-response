@@ -41,6 +41,12 @@ def live_server(tmp_path_factory):
         # unhelpfully for this suite, reports these nonexistent services as
         # unhealthy and the incidents never resolve).
         "DOCKER_HOST": "unix:///nonexistent/docker.sock",
+        # Likewise blank any LLM provider keys from the local `.env` (this
+        # suite tests HTTP/concurrency, not LLM quality/latency) so the
+        # server resolves incidents with the deterministic mock agents
+        # instead of making real, slow/network-dependent LLM API calls.
+        "ANTHROPIC_API_KEY": "",
+        "OPENAI_API_KEY": "",
     }
 
     proc = subprocess.Popen(
