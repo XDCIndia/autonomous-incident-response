@@ -34,6 +34,7 @@ services:
       # rpc/db proxies — is guaranteed by the backend's bounded startup
       # retry loop instead (see ToxiproxyClient.ensure_default_proxies).
       toxiproxy:
+        condition: service_started
 
   frontend:
     build:
