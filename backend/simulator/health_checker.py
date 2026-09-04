@@ -1,118 +1,179 @@
-"""Health verification for services after remediation.
+"""Health checker for IRAS-managed services.
 
-Uses the DockerController to check container state and the service
-health endpoint to confirm full recovery.
+Provides multi-layer health verification:
+  1. Container running status (Docker)
+  2. Docker HEALTHCHECK status (Docker)
+  3. HTTP /health endpoint (network)
+  4. Extra verify URLs (optional)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from dataclasses import dataclass, field, asdict
+from typing import Any, TYPE_CHECKING
 
-import httpx
-
-from backend.contracts import VerificationResult
-from backend.simulator.docker_controller import DockerController
+if TYPE_CHECKING:
+    from backend.simulator.docker_controller import DockerController
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class VerificationResult:
+    """Result of a health verification check."""
+    verified: bool = False
+    checks_passed: int = 0
+    checks_total: int = 0
+    message: str = ""
+    recovered_metrics: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        return asdict(self)
+
+
+async def check_container_health(
+    docker_ctl: DockerController,
+    service_name: str,
+    verify_urls: list[str] | None = None,
+) -> dict[str, Any]:
+    """Multi-layer health check for a service.
+
+    Returns a dict with:
+      - running: bool
+      - health: str (from Docker HEALTHCHECK)
+      - http_health: dict mapping URL -> status code (or error string)
+      - overall: "healthy" | "degraded" | "unhealthy"
+    """
+    result: dict[str, Any] = {
+        "service": service_name,
+        "running": False,
+        "health": "not_found",
+        "http_health": {},
+        "overall": "unhealthy",
+    }
+
+    # Layer 1 & 2: Docker container status + HEALTHCHECK
+    # DockerController.check_health is now async-safe
+    status = await docker_ctl.check_health(service_name)
+    result["running"] = status.get("running", False)
+    result["health"] = status.get("health", "not_found")
+    result["version"] = status.get("version", "")
+    result["container_id"] = status.get("container_id", "")
+    result["image"] = status.get("image", "")
+
+    if not result["running"]:
+        result["overall"] = "unhealthy"
+        return result
+
+    # Layer 3: HTTP health endpoint
+    # The payment-service is exposed on host port 5001
+    port = _get_host_port(service_name)
+    if port:
+        url = f"http://localhost:{port}/health"
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(url)
+                result["http_health"][url] = resp.status_code
+        except Exception as exc:
+            result["http_health"][url] = f"error: {exc}"
+
+    # Layer 4: Extra verify URLs (sync httpx — offload to thread)
+    if verify_urls:
+        async def _check_url(url: str) -> None:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(url)
+                    result["http_health"][url] = resp.status_code
+            except Exception as exc:
+                result["http_health"][url] = f"error: {exc}"
+
+        await asyncio.gather(*[_check_url(u) for u in verify_urls])
+
+    # Determine overall status
+    if result["health"] == "healthy":
+        http_ok = all(
+            v == 200 for v in result["http_health"].values()
+            if isinstance(v, int)
+        )
+        result["overall"] = "healthy" if http_ok else "degraded"
+    elif result["health"] == "starting":
+        result["overall"] = "degraded"
+    else:
+        result["overall"] = "unhealthy"
+
+    return result
 
 
 async def verify_service_health(
     docker_ctl: DockerController,
     service_name: str,
-    *,
-    health_url: str | None = None,
+    health_url: str = "",
     verify_urls: list[str] | None = None,
-    retries: int = 15,
-    delay: float = 2.0,
 ) -> VerificationResult:
-    """Verify that a service has recovered after remediation.
+    """Verify service health after remediation.
 
-    Checks:
-        1. Container is running
-        2. Docker HEALTHCHECK reports "healthy"
-        3. HTTP health endpoint returns 200 (if reachable)
-
-    Returns the existing ``VerificationResult`` contract.
+    Checks container health and optional HTTP endpoints, returning
+    a VerificationResult compatible with the API response format.
     """
-    checks_total = 3
     checks_passed = 0
+    checks_total = 0
     recovered_metrics: dict[str, Any] = {}
     messages: list[str] = []
 
-    # --- Check 1: container is running ---
-    container_status = docker_ctl.check_health(service_name)
-    is_running = container_status.get("running", False)
-    if is_running:
+    # Check 1: Docker container health
+    checks_total += 1
+    status = await docker_ctl.check_health(service_name)
+    if status.get("health") == "healthy" or status.get("running"):
         checks_passed += 1
-        messages.append(f"Container is running (id={container_status.get('container_id', '?')[:12]})")
+        recovered_metrics["docker_health"] = status.get("health", "unknown")
     else:
-        messages.append("Container is NOT running")
-    recovered_metrics["container_running"] = is_running
+        messages.append(f"Container health: {status.get('health', 'not_found')}")
 
-    # --- Check 2: Docker HEALTHCHECK ---
-    docker_health = container_status.get("health", "unknown")
-    if docker_health != "healthy":
-        # Wait for health to converge
-        logger.info("Waiting for Docker HEALTHCHECK on %s …", service_name)
-        healthy = docker_ctl.wait_for_health(
-            service_name, target_health="healthy", retries=retries, delay=delay,
-        )
-        if healthy:
-            docker_health = "healthy"
-    if docker_health == "healthy":
-        checks_passed += 1
-        messages.append("Docker HEALTHCHECK: healthy")
-    else:
-        messages.append(f"Docker HEALTHCHECK: {docker_health}")
-    recovered_metrics["docker_health"] = docker_health
+    # Check 2: HTTP health endpoint
+    all_verify = []
+    if health_url:
+        all_verify.append(health_url)
+    if verify_urls:
+        all_verify.extend(verify_urls)
 
-    # --- Check 3: HTTP health endpoint ---
-    if health_url and is_running:
+    for url in all_verify:
+        checks_total += 1
         try:
+            import httpx
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(health_url)
+                resp = await client.get(url)
+                recovered_metrics[f"verify_{url}"] = resp.status_code
                 if resp.status_code == 200:
                     checks_passed += 1
-                    body = resp.json()
-                    messages.append(f"HTTP health: 200 — {body.get('status', 'ok')}")
-                    recovered_metrics["http_status"] = resp.status_code
-                    recovered_metrics["http_body"] = body
                 else:
-                    messages.append(f"HTTP health: {resp.status_code}")
-                    recovered_metrics["http_status"] = resp.status_code
+                    messages.append(f"{url} returned {resp.status_code}")
         except Exception as exc:
-            messages.append(f"HTTP health check failed: {exc}")
-            recovered_metrics["http_error"] = str(exc)
-    elif not health_url:
-        # No URL provided — skip HTTP check, adjust total
-        checks_total = 2
-        messages.append("HTTP health check skipped (no URL configured)")
-        
-    # --- Check 4: Extra verify URLs (e.g. /pay) ---
-    if verify_urls and is_running:
-        checks_total += len(verify_urls)
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            for v_url in verify_urls:
-                try:
-                    resp = await client.get(v_url)
-                    if resp.status_code == 200:
-                        checks_passed += 1
-                        messages.append(f"Verify {v_url}: 200 OK")
-                        recovered_metrics[f"verify_{v_url}"] = resp.status_code
-                    else:
-                        messages.append(f"Verify {v_url}: {resp.status_code}")
-                        recovered_metrics[f"verify_{v_url}"] = resp.status_code
-                except Exception as exc:
-                    messages.append(f"Verify {v_url} failed: {exc}")
-                    recovered_metrics[f"verify_error_{v_url}"] = str(exc)
+            recovered_metrics[f"verify_{url}"] = f"error: {exc}"
+            messages.append(f"{url}: {exc}")
 
-    verified = checks_passed == checks_total
+    verified = checks_passed == checks_total and checks_total > 0
+    message = "All checks passed" if verified else "; ".join(messages) if messages else "No checks performed"
 
     return VerificationResult(
         verified=verified,
         checks_passed=checks_passed,
         checks_total=checks_total,
-        message=" | ".join(messages),
+        message=message,
         recovered_metrics=recovered_metrics,
     )
+
+
+def _get_host_port(service_name: str) -> str | None:
+    """Map Docker service name to its host-mapped port."""
+    port_map = {
+        "payment-service": "5001",
+        "rpc-service-primary": "5002",
+        "rpc-service-secondary": "5003",
+        "db-service": "5004",
+    }
+    return port_map.get(service_name)

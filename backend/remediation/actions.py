@@ -13,6 +13,7 @@ Mock mode (no controller):
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from enum import Enum
@@ -94,6 +95,8 @@ class RemediationEngine:
         action = request.action
 
         # ── Real Docker rollback ────────────────────────────────────────
+        # NOTE: Docker SDK is synchronous — all real operations run in a
+        # thread to avoid blocking the async event loop.
         if action == "rollback_deploy" and self._docker is not None:
             return await self._real_rollback(request)
 
@@ -108,17 +111,13 @@ class RemediationEngine:
         # ── Real Toxiproxy Switch to Secondary ──────────────────────────
         if action == "switch_to_secondary" and self._toxiproxy is not None:
             return await self._real_switch_to_secondary(request)
-            
+
         # ── Real Reset Connection Pool ──────────────────────────────────
         if action == "reset_connection_pool" and self._docker is not None and self._toxiproxy is not None:
             return await self._real_reset_connection_pool(request)
 
         # ── Mock fallback for all other actions ─────────────────────────
         return await self._mock_execute(request)
-
-    # -----------------------------------------------------------------
-    # Real Docker operations
-    # -----------------------------------------------------------------
 
     async def _real_rollback(self, request: RemediationRequest) -> RemediationResult:
         """Rollback a bad deployment using real Docker operations.
@@ -132,7 +131,7 @@ class RemediationEngine:
         params = request.parameters
 
         # Capture before-state
-        before_health = self._docker.check_health(service)
+        before_health = await self._docker.check_health(service)
         before_state = {
             "service": service,
             "status": before_health.get("health", "unknown"),
@@ -165,7 +164,7 @@ class RemediationEngine:
 
         # Step 1: Remove the bad container
         logger.info("Rollback: removing bad deployment for %s", service)
-        self._docker.remove_container(service, force=True)
+        await self._docker.remove_container(service, force=True)
 
         # Step 2: Deploy the previous known-good version
         logger.info(
@@ -177,7 +176,7 @@ class RemediationEngine:
             "FORCE_UNHEALTHY": "false",
             "SERVICE_VERSION": prev_config.version,
         }
-        container = self._docker.deploy_version(
+        container = await self._docker.deploy_version(
             prev_config,
             env_overrides=restored_env_overrides,
         )
@@ -193,9 +192,9 @@ class RemediationEngine:
 
         # Step 3: Wait for the restored container to become healthy
         logger.info("Rollback: waiting for %s to become healthy", service)
-        became_healthy = self._docker.wait_for_health(service, retries=15, delay=2.0)
+        became_healthy = await self._docker.wait_for_health(service, retries=15, delay=2.0)
 
-        after_health = self._docker.check_health(service)
+        after_health = await self._docker.check_health(service)
         after_state = {
             "service": service,
             "status": after_health.get("health", "unknown"),
@@ -228,18 +227,18 @@ class RemediationEngine:
     async def _real_restart(self, request: RemediationRequest) -> RemediationResult:
         """Restart a service container using real Docker operations."""
         service = request.target_service
-        before_health = self._docker.check_health(service)
+        before_health = await self._docker.check_health(service)
         before_state = {
             "service": service,
             "status": before_health.get("health", "unknown"),
             "version": before_health.get("version", "unknown"),
         }
 
-        success = self._docker.restart_container(service)
+        success = await self._docker.restart_container(service)
         if success:
-            self._docker.wait_for_health(service, retries=10, delay=2.0)
+            await self._docker.wait_for_health(service, retries=10, delay=2.0)
 
-        after_health = self._docker.check_health(service)
+        after_health = await self._docker.check_health(service)
         after_state = {
             "service": service,
             "status": after_health.get("health", "unknown"),
@@ -264,7 +263,7 @@ class RemediationEngine:
         before_state = {"proxy": proxy_name, "enabled": True}
         
         # Disable proxy
-        updated = self._toxiproxy.update_proxy(proxy_name, enabled=False)
+        updated = await asyncio.to_thread(self._toxiproxy.update_proxy, proxy_name, enabled=False)
         
         if updated:
             success = True
@@ -289,7 +288,7 @@ class RemediationEngine:
         proxy_name = request.parameters.get("proxy_name", "payment-rpc-proxy")
         secondary_upstream = request.parameters.get("secondary_upstream", "rpc-service-secondary:5000")
         
-        proxy_info = self._toxiproxy.get_proxy(proxy_name)
+        proxy_info = await asyncio.to_thread(self._toxiproxy.get_proxy, proxy_name)
         before_upstream = proxy_info.get("upstream") if proxy_info else "unknown"
         before_state = {"proxy": proxy_name, "upstream": before_upstream}
         
@@ -297,10 +296,10 @@ class RemediationEngine:
         # (Though switching alone might bypass the toxic if toxics are stream specific, but Toxiproxy toxics are proxy-wide)
         # Actually, let's remove the toxic if we know it
         toxic_name = request.parameters.get("toxic_name", "outage_timeout")
-        self._toxiproxy.remove_toxic(proxy_name, toxic_name)
+        await asyncio.to_thread(self._toxiproxy.remove_toxic, proxy_name, toxic_name)
 
         # Switch upstream
-        updated = self._toxiproxy.update_proxy(proxy_name, upstream=secondary_upstream)
+        updated = await asyncio.to_thread(self._toxiproxy.update_proxy, proxy_name, upstream=secondary_upstream)
         
         if updated:
             success = True
@@ -325,7 +324,7 @@ class RemediationEngine:
         proxy_name = request.parameters.get("proxy_name", "payment-db-proxy")
         toxic_name = request.parameters.get("toxic_name", "db_timeout")
         
-        before_health = self._docker.check_health(service)
+        before_health = await self._docker.check_health(service)
         before_state = {
             "service": service,
             "status": before_health.get("health", "unknown"),
@@ -334,14 +333,14 @@ class RemediationEngine:
         }
         
         # Remove the toxic that's causing the DB failure
-        removed = self._toxiproxy.remove_toxic(proxy_name, toxic_name)
+        removed = await asyncio.to_thread(self._toxiproxy.remove_toxic, proxy_name, toxic_name)
         
         # Restart the payment service to flush its connection pool
-        success = self._docker.restart_container(service)
+        success = await self._docker.restart_container(service)
         if success:
-            self._docker.wait_for_health(service, retries=10, delay=2.0)
+            await self._docker.wait_for_health(service, retries=10, delay=2.0)
             
-        after_health = self._docker.check_health(service)
+        after_health = await self._docker.check_health(service)
         after_state = {
             "service": service,
             "status": after_health.get("health", "unknown"),

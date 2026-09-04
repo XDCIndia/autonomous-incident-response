@@ -53,24 +53,26 @@ async def lifespan(app: FastAPI):
     logger.info("Application started — env=%s", settings.app_env)
     
     try:
-        docker_ctl = DockerController()
+        docker_ctl = await asyncio.to_thread(DockerController)
     except Exception as e:
         logger.warning("Could not initialize DockerController: %s", e)
         
     try:
-        toxiproxy_ctl = ToxiproxyClient()
-        toxiproxy_ctl.reset()
+        toxiproxy_ctl = await asyncio.to_thread(ToxiproxyClient)
+        await asyncio.to_thread(toxiproxy_ctl.reset)
         # Pre-create the proxy for the dependency outage scenario
-        toxiproxy_ctl.create_proxy(
+        await asyncio.to_thread(
+            toxiproxy_ctl.create_proxy,
             name="payment-rpc-proxy",
             listen="0.0.0.0:8080",
-            upstream="rpc-service-primary:5000"
+            upstream="rpc-service-primary:5000",
         )
         # Pre-create the proxy for the database failure scenario
-        toxiproxy_ctl.create_proxy(
+        await asyncio.to_thread(
+            toxiproxy_ctl.create_proxy,
             name="payment-db-proxy",
             listen="0.0.0.0:8081",
-            upstream="db-service:5000"
+            upstream="db-service:5000",
         )
     except Exception as e:
         logger.warning("Could not initialize ToxiproxyClient: %s", e)
@@ -146,7 +148,7 @@ async def services_health(service: str = "payment-service"):
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
     
-    status = docker_ctl.check_health(service)
+    status = await docker_ctl.check_health(service)
     return status
 
 
@@ -155,54 +157,62 @@ async def inject_fault(request: FaultInjectionRequest):
     """Inject a fault using real Docker operations."""
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
-        
-    from backend.simulator import inject_bad_deployment, inject_dependency_outage, inject_database_failure
-    
-    if request.scenario == "bad_deployment":
-        result = inject_bad_deployment(
-            service=request.service_name,
-            docker_controller=docker_ctl,
-            **request.parameters
-        )
-        return {
-            "status": "success",
-            "message": f"Injected {request.scenario} on {request.service_name}",
-            "docker_performed": result.docker_performed,
-            "metadata": {
-                "previous_config": result.previous_config,
-                "bad_version": result.bad_version
+
+    from backend.simulator.scenarios import inject_bad_deployment, inject_dependency_outage, inject_database_failure
+
+    try:
+        if request.scenario == "bad_deployment":
+            result = await inject_bad_deployment(
+                service=request.service_name,
+                docker_controller=docker_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": {
+                    "previous_config": result.previous_config,
+                    "bad_version": result.bad_version
+                }
             }
-        }
-    elif request.scenario == "dependency_outage":
-        if toxiproxy_ctl is None:
-            raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
-        result = inject_dependency_outage(
-            service=request.service_name,
-            toxiproxy_client=toxiproxy_ctl,
-            **request.parameters
-        )
-        return {
-            "status": "success",
-            "message": f"Injected {request.scenario} on {request.service_name}",
-            "docker_performed": result.docker_performed,
-            "metadata": result.metadata
-        }
-    elif request.scenario == "database_failure":
-        if toxiproxy_ctl is None:
-            raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
-        result = inject_database_failure(
-            service=request.service_name,
-            toxiproxy_client=toxiproxy_ctl,
-            **request.parameters
-        )
-        return {
-            "status": "success",
-            "message": f"Injected {request.scenario} on {request.service_name}",
-            "docker_performed": result.docker_performed,
-            "metadata": result.metadata
-        }
-    else:
-        raise HTTPException(status_code=400, detail=f"Scenario {request.scenario} not implemented for direct injection")
+        elif request.scenario == "dependency_outage":
+            if toxiproxy_ctl is None:
+                raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+            result = await asyncio.to_thread(
+                inject_dependency_outage,
+                service=request.service_name,
+                toxiproxy_client=toxiproxy_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
+            }
+        elif request.scenario == "database_failure":
+            if toxiproxy_ctl is None:
+                raise HTTPException(status_code=503, detail="Toxiproxy controller not available")
+            result = await asyncio.to_thread(
+                inject_database_failure,
+                service=request.service_name,
+                toxiproxy_client=toxiproxy_ctl,
+                **request.parameters,
+            )
+            return {
+                "status": "success",
+                "message": f"Injected {request.scenario} on {request.service_name}",
+                "docker_performed": result.docker_performed,
+                "metadata": result.metadata
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Scenario {request.scenario} not implemented for direct injection")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Fault injection failed for %s/%s: %s", request.service_name, request.scenario, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Fault injection failed: {e}")
 
 
 @app.post("/remediation/execute")
@@ -210,35 +220,43 @@ async def execute_remediation(request: RemediationRequest):
     """Execute a remediation action using real Docker operations."""
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
-        
+
     engine = RemediationEngine(
-        docker_controller=docker_ctl, 
+        docker_controller=docker_ctl,
         toxiproxy_client=toxiproxy_ctl
     )
-    result = await engine.execute(request)
-    
-    # Also run verification if successful
+    try:
+        result = await engine.execute(request)
+    except Exception as e:
+        logger.error("Remediation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Remediation failed: {e}")
+
+    # Also run verification if successful — use host-mapped ports for HTTP checks
     verification = None
     if result.success:
-        port = "5000" # Fallback port
-        if "payment-service" in request.target_service:
-            # Reconstruct the host port for HTTP health check
-            port = "5001"
-        health_url = f"http://backend:{port}/health" if "payment-service" not in request.target_service else "http://payment-service:5000/health"
-        
-        health_url = f"http://{request.target_service}:5000/health"
-        
+        host_port_map = {
+            "payment-service": "5001",
+            "rpc-service-primary": "5002",
+            "rpc-service-secondary": "5003",
+            "db-service": "5004",
+        }
+        port = host_port_map.get(request.target_service, "5000")
+        health_url = f"http://localhost:{port}/health"
+
         verify_urls = []
         if request.target_service == "payment-service" and request.action in ("circuit_break", "switch_to_secondary", "reset_connection_pool"):
-            verify_urls.append(f"http://{request.target_service}:5000/pay")
-        
-        verification = await verify_service_health(
-            docker_ctl, 
-            request.target_service,
-            health_url=health_url,
-            verify_urls=verify_urls
-        )
-    
+            verify_urls.append(f"http://localhost:{port}/pay")
+
+        try:
+            verification = await verify_service_health(
+                docker_ctl,
+                request.target_service,
+                health_url=health_url,
+                verify_urls=verify_urls
+            )
+        except Exception as e:
+            logger.warning("Verification failed after remediation: %s", e)
+
     return {
         "status": "success" if result.success else "failure",
         "result": result.model_dump(mode="json"),
@@ -267,29 +285,26 @@ async def trigger_incident(request: TriggerRequest):
     )
 
     # Inject signals based on scenario
-    scenario_map = {
-        "bad_deployment": lambda: inject_bad_deployment(service=request.service_name),
-        "database_failure": lambda: inject_database_failure(service=request.service_name),
-        "dependency_outage": lambda: inject_dependency_outage(service=request.service_name),
-        "resource_exhaustion": lambda: inject_resource_exhaustion(service=request.service_name),
-    }
-
-    injector = scenario_map.get(request.scenario)
-    if injector is None:
+    # Note: inject_bad_deployment is async (uses async DockerController);
+    # the others are sync (use sync ToxiproxyClient or are pure mock).
+    if request.scenario == "bad_deployment":
+        result = await inject_bad_deployment(service=request.service_name)
+    elif request.scenario == "database_failure":
+        result = inject_database_failure(service=request.service_name)
+    elif request.scenario == "dependency_outage":
+        result = inject_dependency_outage(service=request.service_name)
+    elif request.scenario == "resource_exhaustion":
+        result = inject_resource_exhaustion(service=request.service_name)
+    else:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown scenario: {request.scenario}. "
-                   f"Available: {list(scenario_map.keys())}",
+                   f"Available: [bad_deployment, database_failure, dependency_outage, resource_exhaustion]",
         )
 
-    result = injector()
-    
     # Extract signals and metadata if the injector returned a FaultInjectionResult
     if hasattr(result, "signals"):
         incident.signals = result.signals
-        # We can also add initial metadata to the incident if desired
-        if hasattr(result, "metadata") and result.metadata:
-            incident.metadata.update(result.metadata)
     else:
         incident.signals = result
 

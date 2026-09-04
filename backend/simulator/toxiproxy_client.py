@@ -7,8 +7,9 @@ logger = logging.getLogger(__name__)
 class ToxiproxyClient:
     """Client for communicating with the Toxiproxy REST API."""
 
-    def __init__(self, api_url: str = "http://toxiproxy:8474"):
-        self.api_url = api_url.rstrip("/")
+    def __init__(self, api_url: str | None = None):
+        import os
+        self.api_url = (api_url or os.environ.get("TOXIPROXY_URL", "http://localhost:8474")).rstrip("/")
         self.client = httpx.Client(timeout=5.0)
 
     def reset(self):

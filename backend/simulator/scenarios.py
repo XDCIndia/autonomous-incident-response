@@ -61,7 +61,7 @@ class FaultInjectionResult:
 # Bad Deployment
 # ---------------------------------------------------------------------------
 
-def inject_bad_deployment(
+async def inject_bad_deployment(
     service: str = "payment-service",
     version: str = "v2.4.1",
     deployed_seconds_ago: float = 30.0,
@@ -88,7 +88,7 @@ def inject_bad_deployment(
     docker_performed = False
 
     if docker_controller is not None:
-        saved = docker_controller.save_container_config(service)
+        saved = await docker_controller.save_container_config(service)
         if saved is None:
             logger.error("Cannot inject bad deployment: no container found for %s", service)
         else:
@@ -98,8 +98,8 @@ def inject_bad_deployment(
                 service, saved.image, saved.version,
             )
             # Remove healthy container and start the bad one
-            docker_controller.remove_container(service, force=True)
-            bad_container = docker_controller.deploy_version(
+            await docker_controller.remove_container(service, force=True)
+            bad_container = await docker_controller.deploy_version(
                 saved,
                 version_override=version,
                 env_overrides={"FORCE_UNHEALTHY": "true", "SERVICE_VERSION": version},

@@ -76,7 +76,8 @@ async def test_database_failure_e2e():
         metrics = verification["recovered_metrics"]
         
         # Expecting our extra verify check for /pay to be present
-        verify_pay_key = "verify_http://payment-service:5000/pay"
+        # The verify URL uses host-mapped port (localhost:5001) not Docker-internal
+        verify_pay_key = "verify_http://localhost:5001/pay"
         assert verify_pay_key in metrics
         assert metrics[verify_pay_key] == 200
         
