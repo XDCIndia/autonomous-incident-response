@@ -32,6 +32,27 @@ from backend.simulator.health_checker import ServiceHealthVerifier
 from backend.simulator.scenarios import inject_bad_deployment
 
 
+@pytest.fixture(autouse=True)
+def _no_real_llm_keys(monkeypatch):
+    """These tests construct IncidentOrchestrator without explicitly
+    injecting log_investigator/metric_investigator/arbiter, relying on its
+    defaults. Since IncidentOrchestrator now defaults to real LLM-backed
+    agents whenever a provider key is configured (see backend/orchestrator/
+    pipeline.py's _llm_configured()), a real key in this repo's local `.env`
+    would make test_autonomous_pipeline_drives_real_engine_and_verifier
+    attempt real, slow/network-dependent LLM calls instead of the
+    deterministic mock agents it was written against — blank both keys so
+    it stays on that deterministic path regardless of the local `.env`.
+    """
+    import backend.platform.config as config_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    config_module._settings = None
+    yield
+    config_module._settings = None
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
