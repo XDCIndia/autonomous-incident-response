@@ -29,6 +29,11 @@ services:
     depends_on:
       payment-service:
         condition: service_healthy
+      # Start ordering only: the toxiproxy image is scratch-based (no
+      # curl/wget for a healthcheck), so readiness — including creating the
+      # rpc/db proxies — is guaranteed by the backend's bounded startup
+      # retry loop instead (see ToxiproxyClient.ensure_default_proxies).
+      toxiproxy:
 
   frontend:
     build:
