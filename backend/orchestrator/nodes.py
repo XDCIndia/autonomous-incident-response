@@ -106,6 +106,9 @@ class VerificationInterface:
 
     async def verify(self, incident: Incident) -> VerificationResult:
         """Verify that remediation was effective."""
+        if incident.source == "url_monitor" and incident.target_url:
+            return await self._verify_via_url(incident.target_url)
+
         if self._docker is None:
             return self._stub_verify(incident)
 
@@ -146,6 +149,38 @@ class VerificationInterface:
             recovered_metrics=result.recovered_metrics,
             metadata=result.metadata,
         )
+
+    async def _verify_via_url(self, target_url: str) -> VerificationResult:
+        """Verify a url_monitor-sourced incident against the REAL target
+        URL directly — there's no docker container/host-port for an
+        arbitrary external application, so this is a plain HTTP re-check,
+        not the container-based multi-layer check above.
+        """
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                resp = await client.get(target_url)
+            verified = resp.status_code < 500
+            return VerificationResult(
+                verified=verified,
+                checks_passed=1 if verified else 0,
+                checks_total=1,
+                message=(
+                    f"{target_url} responded {resp.status_code}"
+                    if verified
+                    else f"{target_url} still returning {resp.status_code}"
+                ),
+                recovered_metrics={"status_code": resp.status_code},
+            )
+        except Exception as e:
+            return VerificationResult(
+                verified=False,
+                checks_passed=0,
+                checks_total=1,
+                message=f"{target_url} still unreachable: {e}",
+                recovered_metrics={},
+            )
 
     def _stub_verify(self, incident: Incident) -> VerificationResult:
         success = incident.remediation_result.success if incident.remediation_result else False
@@ -529,7 +564,16 @@ class OrchestratorNodes:
     # -------------------------------------------------------------------
 
     async def remediate(self, state: OrchestratorState) -> dict:
-        """Stage 6: Execute remediation via the remediation engine interface."""
+        """Stage 6: Execute remediation via the remediation engine interface.
+
+        url_monitor-sourced incidents never reach the real remediation
+        engine: the target is an arbitrary external URL we have no
+        control-plane integration for (no DockerController/ToxiproxyClient
+        maps to it), so "executing" an action would either no-op silently or
+        fabricate success against in-memory mock state that doesn't
+        correspond to anything real. Recommend the action instead of faking
+        it — see the linked issue's remediation-boundary guidance.
+        """
         incident: Incident = state["incident"]
 
         await self._emit(
@@ -539,12 +583,26 @@ class OrchestratorNodes:
             f"Executing remediation: {incident.remediation_request.action}",
         )
 
-        remediation_result = await self.remediation_engine.execute(
-            incident.remediation_request
-        )
+        if incident.source == "url_monitor":
+            remediation_result = RemediationResult(
+                action=incident.remediation_request.action,
+                success=False,
+                message=(
+                    f"Recommended action: {incident.remediation_request.action} — "
+                    f"no control-plane integration configured for {incident.target_url}; "
+                    "requires manual or external action."
+                ),
+            )
+        else:
+            remediation_result = await self.remediation_engine.execute(
+                incident.remediation_request
+            )
         incident.remediation_result = remediation_result
 
-        status = "succeeded" if remediation_result.success else "failed"
+        if incident.source == "url_monitor":
+            status = "recommended"
+        else:
+            status = "succeeded" if remediation_result.success else "failed"
         await self._emit(
             incident,
             PipelineStage.REMEDIATION,

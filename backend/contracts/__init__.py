@@ -21,6 +21,7 @@ from backend.contracts.models import (
     IncidentReport,
     TimelineEvent,
     PipelineResult,
+    MonitoredTarget,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "IncidentReport",
     "TimelineEvent",
     "PipelineResult",
+    "MonitoredTarget",
 ]

@@ -23,6 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.contracts import Incident, IncidentState, TelemetryEvent, RemediationRequest
+from backend.monitoring import targets as target_store
+from backend.monitoring.url_monitor import TargetMonitor
 from backend.orchestrator import IncidentOrchestrator, get_orchestrator, configure_orchestrator
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
@@ -43,6 +45,8 @@ toxiproxy_ctl: Optional[ToxiproxyClient] = None
 # True once the singleton orchestrator has been wired to the real environment.
 _real_env_configured: bool = False
 _real_env_lock: asyncio.Lock = asyncio.Lock()
+# Background URL-monitoring loop (issue #36) — started in lifespan(), cancelled on shutdown.
+_target_monitor_task: Optional[asyncio.Task] = None
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +247,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not wire real orchestrator: %s", e)
 
+    # Start the background URL-monitoring loop (issue #36) — harmless no-op
+    # when zero targets are registered, so this is always safe to start.
+    global _target_monitor_task
+    target_monitor = TargetMonitor(
+        storage,
+        get_orchestrator,
+        interval_seconds=settings.url_monitor_interval_seconds,
+        failure_threshold=settings.url_monitor_failure_threshold,
+    )
+    _target_monitor_task = asyncio.create_task(target_monitor.run_forever())
+
     yield
+
+    if _target_monitor_task is not None:
+        _target_monitor_task.cancel()
+        try:
+            await _target_monitor_task
+        except asyncio.CancelledError:
+            pass
+        _target_monitor_task = None
+
     await storage.close()
     logger.info("Application shutdown")
 
@@ -326,6 +350,17 @@ class FaultInjectionRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
+class TargetCreateRequest(BaseModel):
+    """Request to register a URL for real health monitoring."""
+    name: str
+    url: str
+
+
+class MonitoringToggleRequest(BaseModel):
+    """Request to enable/disable monitoring for a registered target."""
+    enabled: bool
+
+
 # ---------------------------------------------------------------------------
 # REST Endpoints
 # ---------------------------------------------------------------------------
@@ -341,9 +376,65 @@ async def services_health(service: str = "payment-service"):
     """Check the health of a specific IRAS-managed service."""
     if docker_ctl is None:
         raise HTTPException(status_code=503, detail="Docker controller not available")
-    
+
     status = await docker_ctl.check_health(service)
     return status
+
+
+# ---------------------------------------------------------------------------
+# Monitored targets — the real "give us a URL" entry point (issue #36)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/targets", dependencies=[Depends(require_api_key)])
+async def create_target(request: TargetCreateRequest):
+    """Register a URL for real health monitoring.
+
+    Once monitoring_enabled and checked failure_threshold times in a row,
+    a genuine Incident is created and run through the same orchestrator
+    every simulator scenario uses — see backend.monitoring.url_monitor.
+    """
+    storage = get_storage()
+    target = await target_store.create_target(storage, request.name, request.url)
+    return target.model_dump(mode="json")
+
+
+@app.get("/targets")
+async def list_targets():
+    """List all registered monitored targets."""
+    storage = get_storage()
+    targets = await target_store.list_targets(storage)
+    return [t.model_dump(mode="json") for t in targets]
+
+
+@app.get("/targets/{target_id}")
+async def get_target(target_id: str):
+    """Get a single monitored target's current health state."""
+    storage = get_storage()
+    target = await target_store.get_target(storage, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return target.model_dump(mode="json")
+
+
+@app.delete("/targets/{target_id}", dependencies=[Depends(require_api_key)])
+async def delete_target(target_id: str):
+    """Stop monitoring and remove a registered target."""
+    storage = get_storage()
+    deleted = await target_store.delete_target(storage, target_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return {"status": "deleted", "id": target_id}
+
+
+@app.post("/targets/{target_id}/monitoring", dependencies=[Depends(require_api_key)])
+async def toggle_target_monitoring(target_id: str, request: MonitoringToggleRequest):
+    """Enable or disable monitoring for a registered target without deleting it."""
+    storage = get_storage()
+    target = await target_store.set_monitoring_enabled(storage, target_id, request.enabled)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return target.model_dump(mode="json")
 
 
 @app.post("/faults/inject", dependencies=[Depends(require_api_key)])

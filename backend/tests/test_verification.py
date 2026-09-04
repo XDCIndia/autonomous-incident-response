@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+import httpx
+
 import backend.simulator.health_checker as health_checker_module
 from backend.orchestrator.nodes import VerificationInterface
 from backend.simulator.health_checker import VerificationResult as HealthCheckerResult
@@ -175,3 +177,90 @@ class TestRealVerification:
         # on the fixture's remediation_result.
         assert result.verified is True
         assert result.checks_passed == 3
+
+
+class _FakeUrlResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
+class _FakeUrlAsyncClient:
+    def __init__(self, response: _FakeUrlResponse | None = None, raises: Exception | None = None):
+        self._response = response
+        self._raises = raises
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, *args, **kwargs):
+        if self._raises:
+            raise self._raises
+        return self._response
+
+
+class TestUrlMonitorVerification:
+    """url_monitor-sourced incidents verify against the real target URL
+    directly, not the docker/host-port logic — see issue #36."""
+
+    @pytest.fixture
+    def url_monitor_incident(self):
+        incident = Incident(
+            service_name="My App",
+            target_url="http://example.com",
+            source="url_monitor",
+        )
+        incident.remediation_request = RemediationRequest(
+            action="restart_service", target_service="My App"
+        )
+        incident.remediation_result = RemediationResult(action="restart_service", success=False)
+        return incident
+
+    @pytest.mark.asyncio
+    async def test_healthy_url_is_verified(self, monkeypatch, url_monitor_incident):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(_FakeUrlResponse(200)))
+
+        # No docker_ctl at all — url_monitor verification never needs one.
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is True
+        assert result.recovered_metrics["status_code"] == 200
+
+    @pytest.mark.asyncio
+    async def test_5xx_url_is_not_verified(self, monkeypatch, url_monitor_incident):
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(_FakeUrlResponse(503)))
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is False
+        assert result.recovered_metrics["status_code"] == 503
+
+    @pytest.mark.asyncio
+    async def test_connection_error_is_not_verified_and_does_not_crash(self, monkeypatch, url_monitor_incident):
+        monkeypatch.setattr(
+            httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(raises=ConnectionError("refused"))
+        )
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is False
+        assert "refused" in result.message
+
+    @pytest.mark.asyncio
+    async def test_simulator_incident_with_target_url_unset_uses_docker_path(self, monkeypatch):
+        # source defaults to "simulator" — even if target_url happened to be
+        # set, only source == "url_monitor" takes the URL-verification path.
+        incident = Incident(service_name="payment-service", target_url="http://example.com")
+        incident.remediation_result = RemediationResult(action="restart_service", success=True)
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(incident)
+
+        # Falls to the no-docker stub, not the URL check — proven by the
+        # stub's distinctive fixed metrics shape.
+        assert result.recovered_metrics.get("error_rate") is not None
