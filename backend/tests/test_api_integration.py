@@ -16,7 +16,25 @@ from backend.platform.storage import Storage
 
 
 @pytest.fixture(autouse=True)
-async def reset_storage():
+async def reset_storage(monkeypatch):
+    # Blank any LLM provider keys from the local `.env` — see the identical
+    # fixture in backend/tests/e2e/test_pipeline.py for why this matters now
+    # that IncidentOrchestrator() defaults to real LLM-backed agents whenever
+    # a key is configured.
+    import backend.platform.config as config_module
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    # This file's TestWebSocketLiveTimeline tests use `with TestClient(app)
+    # as client:`, which — unlike the ASGITransport tests above — genuinely
+    # runs the app's lifespan(). Since #29 (issue #17), lifespan retries
+    # Toxiproxy readiness for up to 40s whenever REAL_ENV != "off" and
+    # Toxiproxy isn't reachable — which it never is in this test process.
+    # Force REAL_ENV=off so these tests keep booting instantly instead of
+    # blocking on that retry window every run.
+    monkeypatch.setenv("REAL_ENV", "off")
+    config_module._settings = None
+
     storage = Storage(db_path=":memory:")
     await storage.init_db()
     storage_module._storage = storage
@@ -24,6 +42,7 @@ async def reset_storage():
     await storage.close()
     storage_module._storage = None
     orchestrator_module._orchestrator = None
+    config_module._settings = None
 
 
 class TestKnowledgeBaseEndpoint:
@@ -228,12 +247,22 @@ class TestWebSocketLiveTimeline:
             time.sleep(2.0)
 
             with client.websocket_connect(f"/ws/incidents/{incident_id}") as ws:
+                # Break as soon as the terminal "report" stage is seen, not
+                # just on a ping: by the time this connects, the (mock,
+                # near-instant) pipeline has usually already finished, so
+                # /ws/incidents/{id} replays the full stored history and then
+                # has no new live event left to send — waiting for a ping
+                # instead means blocking on the endpoint's full 30s keepalive
+                # timeout for no reason, since the history replay alone
+                # already proves what this test asserts.
                 events = []
                 for _ in range(20):
                     data = ws.receive_json()
                     if data.get("type") == "ping":
                         break
                     events.append(data)
+                    if data.get("stage") == "report":
+                        break
                 stages = [e["stage"] for e in events]
                 assert stages == sorted(stages, key=lambda s: events[stages.index(s)].get("timestamp", ""))
                 assert stages[0] == "detection"

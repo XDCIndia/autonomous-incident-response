@@ -15,6 +15,32 @@ interface TimelineEvent {
   metadata: Record<string, unknown>;
 }
 
+interface LogInvestigationResult {
+  hypothesis: string;
+  evidence: string[];
+  confidence: number;
+  suggested_root_cause: string;
+}
+
+interface MetricInvestigationResult {
+  hypothesis: string;
+  evidence: string[];
+  confidence: number;
+  suggested_root_cause: string;
+  metrics_summary: Record<string, unknown>;
+}
+
+interface ArbiterResult {
+  merged_hypothesis: string;
+  root_cause: string;
+  confidence: number;
+  log_hypothesis_agrees: boolean;
+  metric_hypothesis_agrees: boolean;
+  conflict_description: string | null;
+  evidence: string[];
+  contributing_factors: string[];
+}
+
 interface Incident {
   id: string;
   service_name: string;
@@ -22,6 +48,9 @@ interface Incident {
   severity: string | null;
   current_stage: string | null;
   created_at: string;
+  log_result: LogInvestigationResult | null;
+  metric_result: MetricInvestigationResult | null;
+  arbiter_result: ArbiterResult | null;
   report: {
     root_cause: string;
     impact: string;
@@ -32,6 +61,17 @@ interface Incident {
   } | null;
 }
 
+interface SimilarIncident {
+  id: number;
+  incident_id: string | null;
+  service: string;
+  root_cause: string;
+  description: string;
+  resolved_via: string;
+  created_at: string;
+  similarity: number;
+}
+
 export default function IncidentPage() {
   const params = useParams();
   const id = params.id as string;
@@ -39,6 +79,8 @@ export default function IncidentPage() {
   const [incident, setIncident] = useState<Incident | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [connected, setConnected] = useState(false);
+  const [similarIncidents, setSimilarIncidents] = useState<SimilarIncident[] | null>(null);
+  const [similarLoading, setSimilarLoading] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   // Fetch incident details
@@ -83,6 +125,24 @@ export default function IncidentPage() {
 
     return () => ws.close();
   }, [id]);
+
+  // Once the report lands (root cause is final), look up similar past
+  // incidents from the knowledge base — keyed on service+root_cause rather
+  // than the whole `incident` object so it doesn't re-fetch on every
+  // WebSocket-triggered refresh once the report itself hasn't changed.
+  const reportRootCause = incident?.report?.root_cause;
+  useEffect(() => {
+    if (!incident || !reportRootCause) return;
+
+    setSimilarLoading(true);
+    const query = `${incident.service_name} ${reportRootCause}`;
+    fetch(`${API_URL}/knowledge-base/search?query=${encodeURIComponent(query)}&top_k=3`)
+      .then((res) => res.json())
+      .then((data) => setSimilarIncidents(data.results ?? []))
+      .catch(console.error)
+      .finally(() => setSimilarLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incident?.service_name, reportRootCause]);
 
   if (!incident) {
     return <p>Loading incident...</p>;
@@ -150,6 +210,84 @@ export default function IncidentPage() {
         </div>
       </div>
 
+      {(incident.log_result || incident.metric_result) && (
+        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px", marginBottom: "32px" }}>
+          <h3 style={{ margin: "0 0 12px" }}>Investigation</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+            <div>
+              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
+                Log Investigator
+              </h4>
+              {incident.log_result ? (
+                <dl style={{ margin: 0 }}>
+                  <dt style={{ fontWeight: "bold" }}>Hypothesis</dt>
+                  <dd>{incident.log_result.hypothesis}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Suggested Root Cause</dt>
+                  <dd>{incident.log_result.suggested_root_cause}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Confidence</dt>
+                  <dd>{(incident.log_result.confidence * 100).toFixed(0)}%</dd>
+                </dl>
+              ) : (
+                <p style={{ color: "#666" }}>No log evidence.</p>
+              )}
+            </div>
+            <div>
+              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
+                Metric Investigator
+              </h4>
+              {incident.metric_result ? (
+                <dl style={{ margin: 0 }}>
+                  <dt style={{ fontWeight: "bold" }}>Hypothesis</dt>
+                  <dd>{incident.metric_result.hypothesis}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Suggested Root Cause</dt>
+                  <dd>{incident.metric_result.suggested_root_cause}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Confidence</dt>
+                  <dd>{(incident.metric_result.confidence * 100).toFixed(0)}%</dd>
+                </dl>
+              ) : (
+                <p style={{ color: "#666" }}>No metric evidence.</p>
+              )}
+            </div>
+          </div>
+
+          {incident.arbiter_result && (
+            <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #eee" }}>
+              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
+                Arbiter
+              </h4>
+              {incident.arbiter_result.conflict_description && (
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    marginBottom: "10px",
+                    background: "#fff3cd",
+                    border: "1px solid #ffe69c",
+                    borderRadius: "6px",
+                    fontSize: "13px",
+                  }}
+                >
+                  <strong>⚠ Conflict:</strong> {incident.arbiter_result.conflict_description}
+                </div>
+              )}
+              <dl style={{ margin: 0 }}>
+                <dt style={{ fontWeight: "bold" }}>Merged Hypothesis</dt>
+                <dd>{incident.arbiter_result.merged_hypothesis}</dd>
+                <dt style={{ fontWeight: "bold" }}>Root Cause</dt>
+                <dd>{incident.arbiter_result.root_cause}</dd>
+                <dt style={{ fontWeight: "bold" }}>Confidence</dt>
+                <dd>{(incident.arbiter_result.confidence * 100).toFixed(0)}%</dd>
+                {incident.arbiter_result.contributing_factors.length > 0 && (
+                  <>
+                    <dt style={{ fontWeight: "bold" }}>Contributing Factors</dt>
+                    <dd>{incident.arbiter_result.contributing_factors.join(", ")}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          )}
+        </div>
+      )}
+
       {incident.report && (
         <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
           <h3 style={{ margin: "0 0 12px" }}>Incident Report</h3>
@@ -165,6 +303,40 @@ export default function IncidentPage() {
             <dt style={{ fontWeight: "bold" }}>Prevention</dt>
             <dd>{incident.report.prevention}</dd>
           </dl>
+        </div>
+      )}
+
+      {incident.report && (
+        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px", marginTop: "24px" }}>
+          <h3 style={{ margin: "0 0 12px" }}>Similar Past Incidents</h3>
+          {similarLoading ? (
+            <p style={{ color: "#666" }}>Searching knowledge base...</p>
+          ) : !similarIncidents || similarIncidents.length === 0 ? (
+            <p style={{ color: "#666" }}>No similar past incidents found.</p>
+          ) : (
+            similarIncidents.map((match) => (
+              <div
+                key={match.id}
+                style={{
+                  padding: "10px 12px",
+                  marginBottom: "8px",
+                  background: "#f8f9fa",
+                  border: "1px solid #eee",
+                  borderRadius: "6px",
+                  fontSize: "13px",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                  <strong>
+                    {match.service} — {match.root_cause}
+                  </strong>
+                  <span style={{ color: "#666" }}>{(match.similarity * 100).toFixed(0)}% match</span>
+                </div>
+                <p style={{ margin: "0 0 4px" }}>{match.description}</p>
+                <small style={{ color: "#666" }}>Resolved via: {match.resolved_via}</small>
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>
