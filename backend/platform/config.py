@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # Severity thresholds
     approval_timeout_minutes: int = 15
 
+    # Whether /incidents/trigger should drive the real Docker/Toxiproxy
+    # environment instead of mock signals + mock remediation.
+    #   auto -> use real env only when the IRAS service stack is running
+    #   on   -> always use real env (fail loudly if unavailable)
+    #   off  -> always stay in mock mode
+    real_env: str = "auto"
+
     # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
     # and isn't backend config — reject only unknown *backend* keys, not those.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

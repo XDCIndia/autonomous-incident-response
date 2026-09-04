@@ -27,7 +27,17 @@ def _free_port() -> int:
 def live_server(tmp_path_factory):
     port = _free_port()
     workdir = tmp_path_factory.mktemp("live_server")
-    env = {**os.environ, "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db"}
+    # This file exercises concurrency/persistence against a *mock* pipeline
+    # (e.g. resource_exhaustion auto-resolves in-memory).  Pin REAL_ENV=off so
+    # the spawned backend never auto-wires the real Docker/Toxiproxy env just
+    # because the IRAS stack happens to be running (auto mode), which would
+    # slow the load test with real docker calls and escalate mock-remediated
+    # incidents.
+    env = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite+aiosqlite:///{workdir}/incidents.db",
+        "REAL_ENV": "off",
+    }
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "backend.api.app:app", "--host", "127.0.0.1", "--port", str(port)],
