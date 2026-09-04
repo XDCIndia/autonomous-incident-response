@@ -11,18 +11,26 @@ Verifies:
 import pytest
 from httpx import AsyncClient, ASGITransport
 
+import backend.platform.storage as storage_module
 from backend.api.app import app
-from backend.platform.storage import get_storage
+from backend.platform.storage import Storage
 from backend.platform.events import get_event_bus
 
 
 @pytest.fixture(autouse=True)
 async def reset_storage():
-    """Reset storage before each test."""
-    storage = get_storage()
-    storage._incidents.clear()
-    storage._timelines.clear()
+    """Give each test a fresh in-memory SQLite-backed Storage singleton.
+
+    The routes under test call the module-level `get_storage()` singleton,
+    so we swap it out directly rather than reaching into private attributes
+    of the old in-memory mock (which no longer exist on the real Storage).
+    """
+    storage = Storage(db_path=":memory:")
+    await storage.init_db()
+    storage_module._storage = storage
     yield
+    await storage.close()
+    storage_module._storage = None
 
 
 @pytest.mark.e2e
