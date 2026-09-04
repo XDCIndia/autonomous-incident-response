@@ -15,6 +15,32 @@ interface TimelineEvent {
   metadata: Record<string, unknown>;
 }
 
+interface LogInvestigationResult {
+  hypothesis: string;
+  evidence: string[];
+  confidence: number;
+  suggested_root_cause: string;
+}
+
+interface MetricInvestigationResult {
+  hypothesis: string;
+  evidence: string[];
+  confidence: number;
+  suggested_root_cause: string;
+  metrics_summary: Record<string, unknown>;
+}
+
+interface ArbiterResult {
+  merged_hypothesis: string;
+  root_cause: string;
+  confidence: number;
+  log_hypothesis_agrees: boolean;
+  metric_hypothesis_agrees: boolean;
+  conflict_description: string | null;
+  evidence: string[];
+  contributing_factors: string[];
+}
+
 interface Incident {
   id: string;
   service_name: string;
@@ -22,6 +48,9 @@ interface Incident {
   severity: string | null;
   current_stage: string | null;
   created_at: string;
+  log_result: LogInvestigationResult | null;
+  metric_result: MetricInvestigationResult | null;
+  arbiter_result: ArbiterResult | null;
   report: {
     root_cause: string;
     impact: string;
@@ -149,6 +178,84 @@ export default function IncidentPage() {
           </div>
         </div>
       </div>
+
+      {(incident.log_result || incident.metric_result) && (
+        <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px", marginBottom: "32px" }}>
+          <h3 style={{ margin: "0 0 12px" }}>Investigation</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+            <div>
+              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
+                Log Investigator
+              </h4>
+              {incident.log_result ? (
+                <dl style={{ margin: 0 }}>
+                  <dt style={{ fontWeight: "bold" }}>Hypothesis</dt>
+                  <dd>{incident.log_result.hypothesis}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Suggested Root Cause</dt>
+                  <dd>{incident.log_result.suggested_root_cause}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Confidence</dt>
+                  <dd>{(incident.log_result.confidence * 100).toFixed(0)}%</dd>
+                </dl>
+              ) : (
+                <p style={{ color: "#666" }}>No log evidence.</p>
+              )}
+            </div>
+            <div>
+              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
+                Metric Investigator
+              </h4>
+              {incident.metric_result ? (
+                <dl style={{ margin: 0 }}>
+                  <dt style={{ fontWeight: "bold" }}>Hypothesis</dt>
+                  <dd>{incident.metric_result.hypothesis}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Suggested Root Cause</dt>
+                  <dd>{incident.metric_result.suggested_root_cause}</dd>
+                  <dt style={{ fontWeight: "bold" }}>Confidence</dt>
+                  <dd>{(incident.metric_result.confidence * 100).toFixed(0)}%</dd>
+                </dl>
+              ) : (
+                <p style={{ color: "#666" }}>No metric evidence.</p>
+              )}
+            </div>
+          </div>
+
+          {incident.arbiter_result && (
+            <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #eee" }}>
+              <h4 style={{ margin: "0 0 8px", fontSize: "13px", color: "#666", textTransform: "uppercase" }}>
+                Arbiter
+              </h4>
+              {incident.arbiter_result.conflict_description && (
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    marginBottom: "10px",
+                    background: "#fff3cd",
+                    border: "1px solid #ffe69c",
+                    borderRadius: "6px",
+                    fontSize: "13px",
+                  }}
+                >
+                  <strong>⚠ Conflict:</strong> {incident.arbiter_result.conflict_description}
+                </div>
+              )}
+              <dl style={{ margin: 0 }}>
+                <dt style={{ fontWeight: "bold" }}>Merged Hypothesis</dt>
+                <dd>{incident.arbiter_result.merged_hypothesis}</dd>
+                <dt style={{ fontWeight: "bold" }}>Root Cause</dt>
+                <dd>{incident.arbiter_result.root_cause}</dd>
+                <dt style={{ fontWeight: "bold" }}>Confidence</dt>
+                <dd>{(incident.arbiter_result.confidence * 100).toFixed(0)}%</dd>
+                {incident.arbiter_result.contributing_factors.length > 0 && (
+                  <>
+                    <dt style={{ fontWeight: "bold" }}>Contributing Factors</dt>
+                    <dd>{incident.arbiter_result.contributing_factors.join(", ")}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+          )}
+        </div>
+      )}
 
       {incident.report && (
         <div style={{ padding: "16px", border: "1px solid #eee", borderRadius: "8px" }}>
