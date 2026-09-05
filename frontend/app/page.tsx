@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Button, Chip, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { CineNetworkBackground } from "@/components/CineNetworkBackground";
 import { getServiceHealth, listIncidents } from "@/lib/api";
 import { KNOWN_SERVICES, type IncidentSummary, type ServiceHealth } from "@/lib/types";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
@@ -212,6 +213,7 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col">
+      <CineNetworkBackground />
       {/* ── header ── */}
       <header className="glass-nav sticky top-0 z-40">
         <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between gap-4 px-6 sm:px-10">
