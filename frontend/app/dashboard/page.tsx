@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
   ApiError,
   createTarget,
@@ -72,6 +73,136 @@ function linkedIncidentId(target: MonitoredTarget, incidents: IncidentSummary[] 
 }
 
 type FetchState<T> = { status: "loading" | "ready" | "error"; data: T | null; error: string | null };
+
+function ServiceHealthCard({
+  svc,
+  status,
+  loading,
+  delay,
+}: {
+  svc: string;
+  status: ServiceHealth | null | undefined;
+  loading: boolean;
+  delay: number;
+}) {
+  const reveal = useScrollReveal<HTMLDivElement>(delay);
+  const dotState = loading ? "neutral" : !status ? "neutral" : status.health === "healthy" ? "healthy" : status.health === "starting" ? "warning" : "critical";
+  const label = loading ? "checking…" : !status ? "unavailable" : status.health;
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`glow-card bg-[var(--color-bg-surface)] px-3.5 py-3 ${reveal.className}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[13px] font-medium text-[var(--color-text-primary)]">
+          {serviceDisplayName(svc)}
+        </span>
+        <StatusDot state={dotState} size="sm" pulse={dotState === "healthy"} />
+      </div>
+      <div className="mt-1.5 flex items-center justify-between">
+        <span className="font-mono text-[11px] capitalize text-[var(--color-text-muted)]">{label}</span>
+        {status?.version && (
+          <span className="font-mono text-[10px] text-[var(--color-text-faint)]">{status.version}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ScenarioButton({
+  scenario,
+  busy,
+  disabled,
+  delay,
+  onTrigger,
+}: {
+  scenario: { id: string; label: string; description: string; service: string };
+  busy: boolean;
+  disabled: boolean;
+  delay: number;
+  onTrigger: () => void;
+}) {
+  const reveal = useScrollReveal<HTMLButtonElement>(delay);
+  return (
+    <button
+      ref={reveal.ref}
+      style={reveal.style}
+      onClick={onTrigger}
+      disabled={disabled}
+      className={`flex flex-col gap-2 rounded-md border px-4 py-4 text-left transition-all duration-200 ${reveal.className} ${
+        disabled
+          ? "cursor-not-allowed opacity-50 border-[var(--color-border-subtle)]"
+          : "border-[var(--color-border-default)] hover:border-[rgba(255,77,103,0.4)] hover:bg-[rgba(255,77,103,0.05)] active:scale-[0.98]"
+      }`}
+    >
+      <span className="text-[14px] font-semibold text-[var(--color-text-primary)]">
+        {busy ? "Triggering…" : scenario.label}
+      </span>
+      <span className="text-[12px] leading-relaxed text-[var(--color-text-muted)]">{scenario.description}</span>
+      <span className="font-mono text-[11px] text-[var(--color-text-faint)]">{scenario.service}</span>
+    </button>
+  );
+}
+
+function IncidentRow({
+  incident,
+  onOpen,
+}: {
+  incident: IncidentSummary;
+  onOpen: () => void;
+}) {
+  const reveal = useScrollReveal<HTMLTableRowElement>();
+  return (
+    <tr
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`cursor-pointer border-b border-[var(--color-border-subtle)] transition-colors hover:bg-[var(--color-bg-hover)] ${reveal.className}`}
+      onClick={onOpen}
+    >
+      <td className="py-2.5 pr-4">
+        <Link
+          href={`/incidents/${incident.id}`}
+          className="font-mono text-[var(--color-accent-cyan)] hover:underline"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {incident.id.slice(0, 8)}…
+        </Link>
+      </td>
+      <td className="py-2.5 pr-4 text-[var(--color-text-primary)]">{serviceDisplayName(incident.service_name)}</td>
+      <td className="py-2.5 pr-4">
+        <Chip tone={stateTone(incident.state)}>{incident.state}</Chip>
+      </td>
+      <td className="py-2.5 pr-4">
+        {incident.severity ? <Chip tone={severityTone(incident.severity)}>{incident.severity}</Chip> : "—"}
+      </td>
+      <td className="py-2.5 pr-4 text-[var(--color-text-muted)]">{incident.current_stage ?? "—"}</td>
+      <td className="py-2.5 text-[var(--color-text-muted)]">{new Date(incident.created_at).toLocaleTimeString()}</td>
+    </tr>
+  );
+}
+
+function KbResultCard({ result }: { result: KnowledgeBaseResult }) {
+  const reveal = useScrollReveal<HTMLDivElement>();
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`glow-card bg-[var(--color-bg-surface)] px-4 py-3 ${reveal.className}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[13px] font-medium text-[var(--color-text-primary)]">
+          {serviceDisplayName(result.service)}
+        </span>
+        <MicroLabel>{(result.similarity * 100).toFixed(0)}% match</MicroLabel>
+      </div>
+      <p className="mt-1 text-[13px] text-[var(--color-text-secondary)]">{result.description}</p>
+      <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+        root cause: {result.root_cause} · resolved via: {result.resolved_via}
+      </p>
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const router = useRouter();
@@ -326,39 +457,15 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {KNOWN_SERVICES.map((svc) => {
-                const status = health.data?.[svc];
-                const dotState =
-                  health.status === "loading"
-                    ? "neutral"
-                    : !status
-                      ? "neutral"
-                      : status.health === "healthy"
-                        ? "healthy"
-                        : status.health === "starting"
-                          ? "warning"
-                          : "critical";
-                const label = health.status === "loading" ? "checking…" : !status ? "unavailable" : status.health;
-                return (
-                  <div
-                    key={svc}
-                    className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3.5 py-3"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-[13px] font-medium text-[var(--color-text-primary)]">
-                        {serviceDisplayName(svc)}
-                      </span>
-                      <StatusDot state={dotState} size="sm" pulse={dotState === "healthy"} />
-                    </div>
-                    <div className="mt-1.5 flex items-center justify-between">
-                      <span className="font-mono text-[11px] capitalize text-[var(--color-text-muted)]">{label}</span>
-                      {status?.version && (
-                        <span className="font-mono text-[10px] text-[var(--color-text-faint)]">{status.version}</span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+              {KNOWN_SERVICES.map((svc, i) => (
+                <ServiceHealthCard
+                  key={svc}
+                  svc={svc}
+                  status={health.data?.[svc]}
+                  loading={health.status === "loading"}
+                  delay={i * 70}
+                />
+              ))}
             </div>
           )}
         </Panel>
@@ -370,28 +477,16 @@ export default function Dashboard() {
             pipeline, not real monitoring.
           </p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {SCENARIOS.map((s) => {
-              const busy = triggering === s.id;
-              const disabled = triggering !== null;
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => handleTrigger(s.id, s.service)}
-                  disabled={disabled}
-                  className={`flex flex-col gap-2 rounded-md border px-4 py-4 text-left transition-all duration-200 ${
-                    disabled
-                      ? "cursor-not-allowed opacity-50 border-[var(--color-border-subtle)]"
-                      : "border-[var(--color-border-default)] hover:border-[rgba(255,77,103,0.4)] hover:bg-[rgba(255,77,103,0.05)] active:scale-[0.98]"
-                  }`}
-                >
-                  <span className="text-[14px] font-semibold text-[var(--color-text-primary)]">
-                    {busy ? "Triggering…" : s.label}
-                  </span>
-                  <span className="text-[12px] leading-relaxed text-[var(--color-text-muted)]">{s.description}</span>
-                  <span className="font-mono text-[11px] text-[var(--color-text-faint)]">{s.service}</span>
-                </button>
-              );
-            })}
+            {SCENARIOS.map((s, i) => (
+              <ScenarioButton
+                key={s.id}
+                scenario={s}
+                busy={triggering === s.id}
+                disabled={triggering !== null}
+                delay={i * 70}
+                onTrigger={() => handleTrigger(s.id, s.service)}
+              />
+            ))}
           </div>
           {triggerError && (
             <div className="mt-3 rounded-md border border-[rgba(255,77,103,0.25)] bg-[rgba(255,77,103,0.05)] px-4 py-3 text-[13px] text-[var(--color-accent-red)]">
@@ -598,32 +693,7 @@ export default function Dashboard() {
                 </thead>
                 <tbody>
                   {incidents.data?.map((inc) => (
-                    <tr
-                      key={inc.id}
-                      className="cursor-pointer border-b border-[var(--color-border-subtle)] transition-colors hover:bg-[var(--color-bg-hover)]"
-                      onClick={() => router.push(`/incidents/${inc.id}`)}
-                    >
-                      <td className="py-2.5 pr-4">
-                        <Link
-                          href={`/incidents/${inc.id}`}
-                          className="font-mono text-[var(--color-accent-cyan)] hover:underline"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {inc.id.slice(0, 8)}…
-                        </Link>
-                      </td>
-                      <td className="py-2.5 pr-4 text-[var(--color-text-primary)]">{serviceDisplayName(inc.service_name)}</td>
-                      <td className="py-2.5 pr-4">
-                        <Chip tone={stateTone(inc.state)}>{inc.state}</Chip>
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        {inc.severity ? <Chip tone={severityTone(inc.severity)}>{inc.severity}</Chip> : "—"}
-                      </td>
-                      <td className="py-2.5 pr-4 text-[var(--color-text-muted)]">{inc.current_stage ?? "—"}</td>
-                      <td className="py-2.5 text-[var(--color-text-muted)]">
-                        {new Date(inc.created_at).toLocaleTimeString()}
-                      </td>
-                    </tr>
+                    <IncidentRow key={inc.id} incident={inc} onOpen={() => router.push(`/incidents/${inc.id}`)} />
                   ))}
                 </tbody>
               </table>
@@ -658,21 +728,7 @@ export default function Dashboard() {
             ) : (
               <div className="mt-3 flex flex-col gap-2">
                 {kbState.data.map((r) => (
-                  <div
-                    key={r.id}
-                    className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-3"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[13px] font-medium text-[var(--color-text-primary)]">
-                        {serviceDisplayName(r.service)}
-                      </span>
-                      <MicroLabel>{(r.similarity * 100).toFixed(0)}% match</MicroLabel>
-                    </div>
-                    <p className="mt-1 text-[13px] text-[var(--color-text-secondary)]">{r.description}</p>
-                    <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-                      root cause: {r.root_cause} · resolved via: {r.resolved_via}
-                    </p>
-                  </div>
+                  <KbResultCard key={r.id} result={r} />
                 ))}
               </div>
             )

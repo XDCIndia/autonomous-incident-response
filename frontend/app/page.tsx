@@ -6,6 +6,7 @@ import { Button, Chip, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { getServiceHealth, listIncidents } from "@/lib/api";
 import { KNOWN_SERVICES, type IncidentSummary, type ServiceHealth } from "@/lib/types";
+import { useScrollReveal } from "@/hooks/useScrollReveal";
 
 const FLOW = [
   { stage: "Detect", caption: "Failure caught in seconds" },
@@ -53,35 +54,6 @@ function useTypedHeadline() {
   const done = typedCount >= HERO_FULL_LENGTH;
 
   return { visiblePlain, visibleGradient, showSpace, done };
-}
-
-// Reveals an element (fade + rise) the first time it scrolls into view, then
-// stops watching — a one-shot "scroll reveal," not a repeating one.
-function useScrollReveal<T extends HTMLElement>(delay = 0) {
-  const ref = useRef<T>(null);
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setVisible(true);
-          observer.unobserve(el);
-        }
-      },
-      { threshold: 0.15, rootMargin: "0px 0px -40px 0px" }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  return {
-    ref,
-    className: `scroll-reveal${visible ? " is-visible" : ""}`,
-    style: { transitionDelay: `${delay}ms` },
-  };
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
