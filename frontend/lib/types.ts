@@ -233,6 +233,29 @@ export const SCENARIOS: { id: string; label: string; service: string; descriptio
   },
 ];
 
+/**
+ * A user-registered application URL the backend actively health-checks —
+ * mirrors backend/contracts/models.py's MonitoredTarget exactly. Returned by
+ * GET /targets, GET /targets/{id}, POST /targets, and
+ * POST /targets/{id}/monitoring.
+ */
+export interface MonitoredTarget {
+  id: string;
+  name: string;
+  url: string;
+  monitoring_enabled: boolean;
+  health_status: string; // "unknown" | "healthy" | "unhealthy"
+  consecutive_failures: number;
+  last_checked_at: string | null;
+  last_status_code: number | null;
+  last_latency_ms: number | null;
+  last_error: string | null;
+  active_incident_id: string | null;
+  incident_reported: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 // Real services from docker-compose.yml — used for the health grid.
 // (toxiproxy is infra, not an application service, so it's excluded here.)
 export const KNOWN_SERVICES = [
