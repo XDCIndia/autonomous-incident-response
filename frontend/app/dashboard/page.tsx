@@ -136,7 +136,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen">
       {/* ── header ── */}
-      <header className="sticky top-0 z-40 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]/85 backdrop-blur-xl">
+      <header className="glass-nav sticky top-0 z-40">
         <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-3">
           <Link href="/" className="flex min-w-0 items-center gap-3">
             <div className="relative grid h-8 w-8 shrink-0 place-items-center">
