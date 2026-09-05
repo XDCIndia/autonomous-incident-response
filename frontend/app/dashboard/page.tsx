@@ -130,10 +130,10 @@ function ScenarioButton({
       style={reveal.style}
       onClick={onTrigger}
       disabled={disabled}
-      className={`flex flex-col gap-2 rounded-md border px-4 py-4 text-left transition-all duration-200 ${reveal.className} ${
+      className={`flex flex-col gap-2 px-4 py-4 text-left transition-all duration-200 ${reveal.className} ${
         disabled
-          ? "cursor-not-allowed opacity-50 border-[var(--color-border-subtle)]"
-          : "border-[var(--color-border-default)] hover:border-[rgba(255,77,103,0.4)] hover:bg-[rgba(255,77,103,0.05)] active:scale-[0.98]"
+          ? "cursor-not-allowed opacity-50 rounded-md border border-[var(--color-border-subtle)]"
+          : "glow-card scenario-danger hover:bg-[rgba(255,77,103,0.05)] active:scale-[0.98]"
       }`}
     >
       <span className="text-[14px] font-semibold text-[var(--color-text-primary)]">
