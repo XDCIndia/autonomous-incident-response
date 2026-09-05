@@ -6,12 +6,23 @@ import { useCallback, useEffect, useState } from "react";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
-import { ApiError, getServiceHealth, listIncidents, searchKnowledgeBase, triggerIncident } from "@/lib/api";
+import {
+  ApiError,
+  createTarget,
+  deleteTarget,
+  getServiceHealth,
+  listIncidents,
+  listTargets,
+  searchKnowledgeBase,
+  setTargetMonitoring,
+  triggerIncident,
+} from "@/lib/api";
 import {
   KNOWN_SERVICES,
   SCENARIOS,
   type IncidentSummary,
   type KnowledgeBaseResult,
+  type MonitoredTarget,
   type SeverityLevel,
   type ServiceHealth,
 } from "@/lib/types";
@@ -36,6 +47,29 @@ function stateTone(state: string): "ok" | "crit" | "warn" | "info" {
   if (state === "failed" || state === "escalated") return "crit";
   if (state === "rejected") return "warn";
   return "info";
+}
+
+function targetHealthDot(target: MonitoredTarget): "healthy" | "warning" | "critical" | "neutral" {
+  if (!target.monitoring_enabled) return "neutral";
+  if (target.health_status === "healthy") return "healthy";
+  if (target.health_status === "unhealthy") return target.incident_reported ? "critical" : "warning";
+  return "neutral";
+}
+
+/**
+ * Resolves the incident to link a target to. url_monitor incidents can reach
+ * a terminal state in well under a second (recommendation-only remediation,
+ * single HTTP verification), so target.active_incident_id — which clears the
+ * moment an incident goes terminal — is almost never populated by the time a
+ * user looks at the dashboard. Cross-referencing the already-loaded incident
+ * list (same GET /incidents call Recent Incidents uses, no new endpoint) by
+ * service_name === target.name recovers the link for that common case too.
+ */
+function linkedIncidentId(target: MonitoredTarget, incidents: IncidentSummary[] | null): string | null {
+  if (target.active_incident_id) return target.active_incident_id;
+  if (!target.incident_reported || !incidents) return null;
+  const match = incidents.find((i) => i.service_name === target.name);
+  return match?.id ?? null;
 }
 
 type FetchState<T> = { status: "loading" | "ready" | "error"; data: T | null; error: string | null };
@@ -187,6 +221,21 @@ export default function Dashboard() {
   const [triggering, setTriggering] = useState<string | null>(null);
   const [triggerError, setTriggerError] = useState<string | null>(null);
 
+  const [targets, setTargets] = useState<FetchState<MonitoredTarget[]>>({
+    status: "loading",
+    data: null,
+    error: null,
+  });
+  const [showAddTarget, setShowAddTarget] = useState(false);
+  const [targetName, setTargetName] = useState("");
+  const [targetUrl, setTargetUrl] = useState("");
+  const [addTargetError, setAddTargetError] = useState<string | null>(null);
+  const [addingTarget, setAddingTarget] = useState(false);
+  // Per-target id -> which action is in flight, so only that row's buttons
+  // disable rather than the whole section.
+  const [targetActionPending, setTargetActionPending] = useState<Record<string, "toggle" | "delete">>({});
+  const [targetActionError, setTargetActionError] = useState<Record<string, string>>({});
+
   const [kbQuery, setKbQuery] = useState("");
   const [kbState, setKbState] = useState<FetchState<KnowledgeBaseResult[]>>({
     status: "ready",
@@ -214,15 +263,106 @@ export default function Dashboard() {
     }
   }, []);
 
+  const loadTargets = useCallback(async () => {
+    try {
+      const data = await listTargets();
+      setTargets({ status: "ready", data, error: null });
+    } catch (e) {
+      setTargets({ status: "error", data: null, error: e instanceof ApiError ? e.message : "Unable to load monitored applications" });
+    }
+  }, []);
+
   useEffect(() => {
     loadHealth();
     loadIncidents();
+    loadTargets();
     const interval = setInterval(() => {
       loadHealth();
       loadIncidents();
+      loadTargets();
     }, 8000);
     return () => clearInterval(interval);
-  }, [loadHealth, loadIncidents]);
+  }, [loadHealth, loadIncidents, loadTargets]);
+
+  const handleAddTarget = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = targetName.trim();
+    const url = targetUrl.trim();
+    setAddTargetError(null);
+
+    if (!name || !url) {
+      setAddTargetError("Both a name and a URL are required.");
+      return;
+    }
+    try {
+      // eslint-disable-next-line no-new
+      new URL(url);
+    } catch {
+      setAddTargetError("Enter a valid URL, including the scheme (e.g. https://example.com).");
+      return;
+    }
+
+    setAddingTarget(true);
+    try {
+      await createTarget(name, url);
+      setTargetName("");
+      setTargetUrl("");
+      setShowAddTarget(false);
+      await loadTargets();
+    } catch (e) {
+      setAddTargetError(e instanceof ApiError ? e.message : "Unable to register this application");
+    } finally {
+      setAddingTarget(false);
+    }
+  };
+
+  const handleToggleMonitoring = async (target: MonitoredTarget) => {
+    setTargetActionPending((prev) => ({ ...prev, [target.id]: "toggle" }));
+    setTargetActionError((prev) => {
+      const next = { ...prev };
+      delete next[target.id];
+      return next;
+    });
+    try {
+      await setTargetMonitoring(target.id, !target.monitoring_enabled);
+      await loadTargets();
+    } catch (e) {
+      setTargetActionError((prev) => ({
+        ...prev,
+        [target.id]: e instanceof ApiError ? e.message : "Unable to update monitoring",
+      }));
+    } finally {
+      setTargetActionPending((prev) => {
+        const next = { ...prev };
+        delete next[target.id];
+        return next;
+      });
+    }
+  };
+
+  const handleDeleteTarget = async (target: MonitoredTarget) => {
+    if (!window.confirm(`Stop monitoring "${target.name}" and remove it?`)) return;
+    setTargetActionPending((prev) => ({ ...prev, [target.id]: "delete" }));
+    setTargetActionError((prev) => {
+      const next = { ...prev };
+      delete next[target.id];
+      return next;
+    });
+    try {
+      await deleteTarget(target.id);
+      await loadTargets();
+    } catch (e) {
+      setTargetActionError((prev) => ({
+        ...prev,
+        [target.id]: e instanceof ApiError ? e.message : "Unable to delete this application",
+      }));
+      setTargetActionPending((prev) => {
+        const next = { ...prev };
+        delete next[target.id];
+        return next;
+      });
+    }
+  };
 
   const handleTrigger = async (scenarioId: string, service: string) => {
     setTriggering(scenarioId);
@@ -330,8 +470,12 @@ export default function Dashboard() {
           )}
         </Panel>
 
-        {/* ── trigger incident ── */}
-        <Panel title="Trigger Incident">
+        {/* ── trigger incident (demo/test scenarios — NOT real monitoring) ── */}
+        <Panel title="Simulate Incident">
+          <p className="-mt-1 mb-3 text-[12px] text-[var(--color-text-muted)]">
+            Controlled demo scenarios against the managed services below — for testing the response
+            pipeline, not real monitoring.
+          </p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {SCENARIOS.map((s, i) => (
               <ScenarioButton
@@ -347,6 +491,166 @@ export default function Dashboard() {
           {triggerError && (
             <div className="mt-3 rounded-md border border-[rgba(255,77,103,0.25)] bg-[rgba(255,77,103,0.05)] px-4 py-3 text-[13px] text-[var(--color-accent-red)]">
               {triggerError}
+            </div>
+          )}
+        </Panel>
+
+        {/* ── monitored applications (real external URL monitoring) ── */}
+        <Panel
+          title="Monitored Applications"
+          right={
+            <div className="flex items-center gap-3">
+              <button
+                onClick={loadTargets}
+                className="label-micro text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
+              >
+                Refresh
+              </button>
+              <Button variant="primary" size="sm" onClick={() => setShowAddTarget((v) => !v)}>
+                {showAddTarget ? "Cancel" : "Add Application"}
+              </Button>
+            </div>
+          }
+        >
+          <p className="-mt-1 mb-4 text-[12px] text-[var(--color-text-muted)]">
+            Add an application URL and System Bachao will continuously watch it for failures — this is
+            real monitoring against the address you provide, not a demo.
+          </p>
+
+          {showAddTarget && (
+            <form
+              onSubmit={handleAddTarget}
+              className="mb-4 flex flex-col gap-3 rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 sm:flex-row sm:items-end"
+            >
+              <div className="flex-1">
+                <label className="label-micro mb-1 block text-[var(--color-text-muted)]">Application name</label>
+                <input
+                  type="text"
+                  value={targetName}
+                  onChange={(e) => setTargetName(e.target.value)}
+                  placeholder="My API"
+                  className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent-cyan)]"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="label-micro mb-1 block text-[var(--color-text-muted)]">URL</label>
+                <input
+                  type="text"
+                  value={targetUrl}
+                  onChange={(e) => setTargetUrl(e.target.value)}
+                  placeholder="https://example.com/health"
+                  className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent-cyan)]"
+                />
+              </div>
+              <Button variant="primary" size="md" disabled={addingTarget}>
+                {addingTarget ? "Adding…" : "Start Monitoring"}
+              </Button>
+            </form>
+          )}
+          {addTargetError && (
+            <div className="mb-4 rounded-md border border-[rgba(255,77,103,0.25)] bg-[rgba(255,77,103,0.05)] px-4 py-3 text-[13px] text-[var(--color-accent-red)]">
+              {addTargetError}
+            </div>
+          )}
+
+          {targets.status === "loading" ? (
+            <p className="text-[13px] text-[var(--color-text-muted)]">Loading…</p>
+          ) : targets.status === "error" ? (
+            <div className="flex items-center justify-between gap-4 rounded-md border border-[rgba(255,77,103,0.25)] bg-[rgba(255,77,103,0.05)] px-4 py-3 text-[13px] text-[var(--color-accent-red)]">
+              <span>{targets.error}</span>
+              <button onClick={loadTargets} className="font-medium underline">
+                Retry
+              </button>
+            </div>
+          ) : targets.data && targets.data.length === 0 ? (
+            <p className="text-[13px] text-[var(--color-text-muted)]">
+              No applications registered yet. Add one above to start real monitoring.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {targets.data?.map((target) => {
+                const pending = targetActionPending[target.id];
+                const rowError = targetActionError[target.id];
+                return (
+                  <div
+                    key={target.id}
+                    className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <StatusDot state={targetHealthDot(target)} size="md" pulse={targetHealthDot(target) === "critical"} />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[14px] font-medium text-[var(--color-text-primary)]">{target.name}</span>
+                            <Chip tone={target.monitoring_enabled ? "ok" : "neutral"}>
+                              {target.monitoring_enabled ? "monitoring" : "paused"}
+                            </Chip>
+                          </div>
+                          <a
+                            href={target.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="truncate font-mono text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-accent-cyan)] hover:underline"
+                          >
+                            {target.url}
+                          </a>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="text-right">
+                          <div className="font-mono text-[11px] text-[var(--color-text-muted)] capitalize">
+                            {target.health_status}
+                            {target.consecutive_failures > 0 && ` · ${target.consecutive_failures} failed check${target.consecutive_failures === 1 ? "" : "s"}`}
+                          </div>
+                          {target.last_checked_at && (
+                            <div className="font-mono text-[10px] text-[var(--color-text-faint)]">
+                              last checked {new Date(target.last_checked_at).toLocaleTimeString()}
+                            </div>
+                          )}
+                        </div>
+
+                        {(() => {
+                          const incidentId = linkedIncidentId(target, incidents.data);
+                          if (incidentId) {
+                            return (
+                              <Link href={`/incidents/${incidentId}`}>
+                                <Button variant="danger" size="sm">
+                                  View Incident
+                                </Button>
+                              </Link>
+                            );
+                          }
+                          if (target.incident_reported) {
+                            return <MicroLabel>incident reported</MicroLabel>;
+                          }
+                          return null;
+                        })()}
+
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={pending !== undefined}
+                            onClick={() => handleToggleMonitoring(target)}
+                          >
+                            {pending === "toggle" ? "…" : target.monitoring_enabled ? "Pause" : "Resume"}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={pending !== undefined}
+                            onClick={() => handleDeleteTarget(target)}
+                          >
+                            {pending === "delete" ? "…" : "Delete"}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                    {rowError && <p className="mt-2 text-[12px] text-[var(--color-accent-red)]">{rowError}</p>}
+                  </div>
+                );
+              })}
             </div>
           )}
         </Panel>

@@ -7,6 +7,7 @@ import type {
   Incident,
   IncidentSummary,
   KnowledgeBaseResult,
+  MonitoredTarget,
   ServiceHealth,
   TriggerResponse,
 } from "./types";
@@ -93,4 +94,36 @@ export async function getServiceHealth(service: string): Promise<ServiceHealth |
 
 export function incidentWebSocketUrl(id: string): string {
   return `${WS_URL}/ws/incidents/${id}`;
+}
+
+// ---------------------------------------------------------------------------
+// Monitored targets (real URL monitoring — backend.monitoring.url_monitor)
+// ---------------------------------------------------------------------------
+
+export function listTargets(): Promise<MonitoredTarget[]> {
+  return request<MonitoredTarget[]>(`/targets`);
+}
+
+export function getTarget(id: string): Promise<MonitoredTarget> {
+  return request<MonitoredTarget>(`/targets/${id}`);
+}
+
+export function createTarget(name: string, url: string): Promise<MonitoredTarget> {
+  return request<MonitoredTarget>(`/targets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, url }),
+  });
+}
+
+export function deleteTarget(id: string): Promise<{ status: string; id: string }> {
+  return request(`/targets/${id}`, { method: "DELETE" });
+}
+
+export function setTargetMonitoring(id: string, enabled: boolean): Promise<MonitoredTarget> {
+  return request<MonitoredTarget>(`/targets/${id}/monitoring`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
 }

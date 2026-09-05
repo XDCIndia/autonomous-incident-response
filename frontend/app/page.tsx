@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Button, Chip, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { getServiceHealth, listIncidents } from "@/lib/api";
