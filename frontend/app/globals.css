@@ -543,6 +543,21 @@ body {
   opacity: 1;
 }
 
+/* .hud-panel (Panel component) also declares its own `transition` — for
+   the background/border-color/box-shadow fade when the theme toggles.
+   Same equal-specificity collision as .glow-card above, but here the two
+   property lists don't overlap at all, so the fix is just to union them
+   in one combined, higher-specificity rule instead of letting whichever
+   is later in the file silently discard the other's transition. */
+.hud-panel.scroll-reveal {
+  transition:
+    background 0.4s ease,
+    border-color 0.3s ease,
+    box-shadow 0.3s ease,
+    opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+    top 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 @keyframes kf-fade {
   from { opacity: 0; }
   to { opacity: 1; }

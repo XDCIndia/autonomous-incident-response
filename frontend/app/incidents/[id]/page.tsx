@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { IconCheck } from "@/components/icons";
+import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
   ApiError,
   approveIncident,
@@ -68,7 +69,7 @@ function StageStepper({ incident, timeline }: { incident: Incident; timeline: Ti
         return (
           <div key={stage} className="flex items-center gap-2">
             <div
-              className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 font-mono text-[10px] tracking-[0.08em] ${
+              className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 font-mono text-[10px] tracking-[0.08em] transition-colors duration-500 ${
                 failed
                   ? "border-[rgba(255,77,103,0.4)] bg-[rgba(255,77,103,0.08)] text-[var(--color-accent-red)]"
                   : done
@@ -87,6 +88,33 @@ function StageStepper({ incident, timeline }: { incident: Incident; timeline: Ti
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ── timeline row — fades/rises in the moment it arrives (initial load or
+   a fresh WebSocket event), not staggered since these arrive one at a
+   time over real time, not as a batch ── */
+
+function TimelineEventRow({ event }: { event: TimelineEvent }) {
+  const reveal = useScrollReveal<HTMLDivElement>();
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`rounded-md px-3 py-2 text-[13px] ${reveal.className} ${
+        event.status === "failed"
+          ? "bg-[rgba(255,77,103,0.06)]"
+          : event.status === "started"
+            ? "bg-[rgba(245,184,75,0.06)]"
+            : "bg-[var(--color-bg-surface)]"
+      }`}
+    >
+      <span className="font-medium text-[var(--color-text-primary)]">{event.stage}</span>
+      <span className="text-[var(--color-text-secondary)]"> — {event.message}</span>
+      <div className="mt-0.5 font-mono text-[11px] text-[var(--color-text-faint)]">
+        {formatTime(event.timestamp)} · {event.status}
+      </div>
     </div>
   );
 }
@@ -355,24 +383,7 @@ export default function IncidentPage() {
               {timeline.length === 0 ? (
                 <p className="text-[13px] text-[var(--color-text-muted)]">Waiting for events…</p>
               ) : (
-                timeline.map((event) => (
-                  <div
-                    key={event.id}
-                    className={`rounded-md px-3 py-2 text-[13px] ${
-                      event.status === "failed"
-                        ? "bg-[rgba(255,77,103,0.06)]"
-                        : event.status === "started"
-                          ? "bg-[rgba(245,184,75,0.06)]"
-                          : "bg-[var(--color-bg-surface)]"
-                    }`}
-                  >
-                    <span className="font-medium text-[var(--color-text-primary)]">{event.stage}</span>
-                    <span className="text-[var(--color-text-secondary)]"> — {event.message}</span>
-                    <div className="mt-0.5 font-mono text-[11px] text-[var(--color-text-faint)]">
-                      {formatTime(event.timestamp)} · {event.status}
-                    </div>
-                  </div>
-                ))
+                timeline.map((event) => <TimelineEventRow key={event.id} event={event} />)
               )}
             </div>
           </Panel>

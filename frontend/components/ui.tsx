@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useScrollReveal } from "@/hooks/useScrollReveal";
 
 export type Tone = "ok" | "warn" | "crit" | "info" | "system" | "neutral";
 
@@ -185,8 +186,17 @@ export function Panel({
   headerClassName?: string;
   flush?: boolean;
 }) {
+  // Fades/rises in the first time this panel is on-screen — whether that's
+  // because the page scrolled to it, or because it just mounted already
+  // in view (e.g. a pipeline-stage panel that only renders once real data
+  // for that stage arrives). Both read as "this just appeared."
+  const reveal = useScrollReveal<HTMLElement>();
   return (
-    <section className={`hud-panel rounded-md ${className}`}>
+    <section
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`hud-panel rounded-md ${reveal.className} ${className}`}
+    >
       {title && (
         <header
           className={`flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] px-4 py-2.5 ${headerClassName}`}
