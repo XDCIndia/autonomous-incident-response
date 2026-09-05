@@ -52,6 +52,17 @@
   --shadow-glow-green: 0 0 10px rgba(0, 214, 163, 0.4);
   --shadow-glow-amber: 0 0 10px rgba(245, 184, 75, 0.4);
 
+  /* glow card — sky-blue bordered accent cards */
+  --glow-card-border: rgba(54, 215, 232, 0.3);
+  --glow-card-border-hover: rgba(54, 215, 232, 0.75);
+  --glow-card-shadow-hover: 0 0 28px rgba(54, 215, 232, 0.4);
+
+  /* glass navbar */
+  --glass-nav-bg: rgba(5, 8, 12, 0.28);
+  --glass-nav-border: rgba(255, 255, 255, 0.05);
+  --glass-nav-highlight: rgba(255, 255, 255, 0.05);
+  --glass-nav-shadow: 0 22px 44px -22px rgba(0, 0, 0, 0.75), 0 1px 0 rgba(54, 215, 232, 0.1);
+
   /* panel gradient */
   --panel-gradient: linear-gradient(170deg, rgba(10, 14, 20, 0.88), rgba(5, 7, 10, 0.94));
   --panel-border-top: rgba(54, 215, 232, 0.12);
@@ -125,6 +136,17 @@
   --shadow-glow-red: 0 0 8px rgba(220, 38, 38, 0.15);
   --shadow-glow-green: 0 0 6px rgba(5, 150, 105, 0.12);
   --shadow-glow-amber: 0 0 6px rgba(217, 119, 6, 0.12);
+
+  /* glow card — sky-blue bordered accent cards */
+  --glow-card-border: rgba(8, 145, 178, 0.28);
+  --glow-card-border-hover: rgba(8, 145, 178, 0.55);
+  --glow-card-shadow-hover: 0 0 18px rgba(8, 145, 178, 0.25);
+
+  /* glass navbar */
+  --glass-nav-bg: rgba(255, 255, 255, 0.32);
+  --glass-nav-border: rgba(15, 23, 42, 0.05);
+  --glass-nav-highlight: rgba(255, 255, 255, 0.65);
+  --glass-nav-shadow: 0 18px 34px -20px rgba(15, 23, 42, 0.28), 0 1px 0 rgba(8, 145, 178, 0.08);
 
   /* panel */
   --panel-gradient: linear-gradient(170deg, rgba(255, 255, 255, 0.95), rgba(248, 250, 252, 0.98));
@@ -264,6 +286,85 @@ body {
 }
 
 /* ============================================================
+   GLOW CARD — sky-blue bordered, glowing accent card
+   ============================================================ */
+
+.glow-card {
+  position: relative;
+  border-radius: 16px;
+  border: 1px solid var(--glow-card-border);
+  box-shadow: var(--shadow-glow-cyan);
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+}
+
+.glow-card:hover {
+  border-color: var(--glow-card-border-hover);
+  box-shadow: var(--glow-card-shadow-hover);
+  transform: translateY(-3px);
+}
+
+/* ============================================================
+   GLASS NAVBAR
+   ============================================================ */
+
+.glass-nav {
+  background: var(--glass-nav-bg);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  border-bottom: 1px solid var(--glass-nav-border);
+  box-shadow:
+    inset 0 1px 0 var(--glass-nav-highlight),
+    var(--glass-nav-shadow);
+  transition: background 0.4s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* ============================================================
+   NAV LINKS
+   ============================================================ */
+
+.nav-link {
+  position: relative;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding-bottom: 3px;
+  transition: color 0.2s ease;
+}
+
+.nav-link::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  right: 50%;
+  bottom: 0;
+  height: 1.5px;
+  background: var(--color-accent-cyan);
+  box-shadow: var(--shadow-glow-cyan);
+  transition: left 0.25s ease, right 0.25s ease;
+}
+
+.nav-link:hover {
+  color: var(--color-text-primary);
+}
+
+.nav-link:hover::after {
+  left: 0;
+  right: 0;
+}
+
+.nav-link.active {
+  color: var(--color-text-primary);
+}
+
+.nav-link.active::after {
+  left: 0;
+  right: 0;
+}
+
+/* ============================================================
    TYPOGRAPHY HELPERS
    ============================================================ */
 
@@ -377,6 +478,84 @@ body {
 }
 .anim-pop {
   animation: kf-pop 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* hero eyebrow — slides up into place. Starts at the same moment as the
+   subtitle below (.anim-slide-down, same delay) but is stretched out
+   (~2.1s) so the two finish revealing right around when the headline's
+   typing effect + its "AI" fade-up both finish too — not an instant
+   flourish, a slow reveal that lands together with the headline.
+   ease-in-out, not the quint ease-out used elsewhere in this file — that
+   curve front-loads nearly all its visual change into the first ~25% of
+   the duration, so a longer duration wouldn't actually look slower. */
+@keyframes kf-slide-up-in {
+  from { opacity: 0; transform: translateY(30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.anim-slide-up {
+  animation: kf-slide-up-in 2.1s ease-in-out both;
+}
+
+/* hero subtitle — slides down into place, timed to land with the eyebrow */
+@keyframes kf-slide-down-in {
+  from { opacity: 0; transform: translateY(-30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.anim-slide-down {
+  animation: kf-slide-down-in 2.1s ease-in-out both;
+}
+
+/* hero headline — "AI" fades/rises up on its own once the typewriter
+   finishes typing "Protected by". display: inline + `top` (not
+   inline-block + transform) for the same background-clip: text reason
+   documented on the typed reveal itself — this span sits inside that same
+   gradient-clipped ancestor. */
+@keyframes kf-ai-reveal-in {
+  from { opacity: 0; top: 24px; }
+  to { opacity: 1; top: 0; }
+}
+.hero-ai-reveal {
+  position: relative;
+  display: inline;
+  opacity: 0;
+  animation: kf-ai-reveal-in 1.1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ============================================================
+   SCROLL REVEAL — fade + rise the first time an element scrolls
+   into view (cards, section headings)
+   ============================================================ */
+
+.scroll-reveal {
+  /* `top` + position: relative, not `transform` — several of these
+     elements (.glow-card) already transition `transform` for their own
+     hover lift at a snappier 0.25s. Both rules are plain single classes of
+     equal specificity, so whichever transition declaration is last in the
+     cascade would win outright rather than merge, breaking one or the
+     other. Using `top` here keeps the two fully independent. */
+  position: relative;
+  top: 28px;
+  opacity: 0;
+  transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1), top 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.scroll-reveal.is-visible {
+  top: 0;
+  opacity: 1;
+}
+
+/* .hud-panel (Panel component) also declares its own `transition` — for
+   the background/border-color/box-shadow fade when the theme toggles.
+   Same equal-specificity collision as .glow-card above, but here the two
+   property lists don't overlap at all, so the fix is just to union them
+   in one combined, higher-specificity rule instead of letting whichever
+   is later in the file silently discard the other's transition. */
+.hud-panel.scroll-reveal {
+  transition:
+    background 0.4s ease,
+    border-color 0.3s ease,
+    box-shadow 0.3s ease,
+    opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+    top 0.9s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @keyframes kf-fade {
@@ -515,6 +694,9 @@ body {
   .anim-rise,
   .anim-pop,
   .anim-fade,
+  .anim-slide-up,
+  .anim-slide-down,
+  .hero-ai-reveal,
   .pulse-ring,
   .pulse-ring-soft,
   .spin-slow,

@@ -6,6 +6,7 @@ import { Button, Chip, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { getServiceHealth, listIncidents } from "@/lib/api";
 import { KNOWN_SERVICES, type IncidentSummary, type ServiceHealth } from "@/lib/types";
+import { useScrollReveal } from "@/hooks/useScrollReveal";
 
 const FLOW = [
   { stage: "Detect", caption: "Failure caught in seconds" },
@@ -23,15 +24,155 @@ function serviceDisplayName(key: string): string {
     .join(" ");
 }
 
+// Hero headline — real character-by-character typing reveal. Growing an
+// actual text string (rather than animating a per-letter span) is what
+// keeps this compatible with the gradient half's background-clip: text —
+// see the word-cascade this replaced, which broke that clip by wrapping
+// each unit in its own element.
+const HERO_PLAIN = "Your system.";
+// "AI" is deliberately held out of the typed string — once the typewriter
+// finishes "Protected by", "AI" makes its own fade-up entrance instead of
+// being typed like the rest (see .hero-ai-reveal below).
+const HERO_GRADIENT_TYPED = "Protected by";
+const HERO_FULL_LENGTH = HERO_PLAIN.length + 1 + HERO_GRADIENT_TYPED.length; // +1 for the space between
+
+function useTypedHeadline() {
+  const [typedCount, setTypedCount] = useState(0);
+
+  useEffect(() => {
+    if (typedCount >= HERO_FULL_LENGTH) return;
+    // A brief pause before the very first letter, then a quick, even
+    // typing cadence.
+    const delay = typedCount === 0 ? 150 : 35;
+    const timer = setTimeout(() => setTypedCount((c) => c + 1), delay);
+    return () => clearTimeout(timer);
+  }, [typedCount]);
+
+  const visiblePlain = HERO_PLAIN.slice(0, Math.min(typedCount, HERO_PLAIN.length));
+  const visibleGradient = HERO_GRADIENT_TYPED.slice(0, Math.max(0, typedCount - HERO_PLAIN.length - 1));
+  const showSpace = visiblePlain.length === HERO_PLAIN.length;
+  const done = typedCount >= HERO_FULL_LENGTH;
+
+  return { visiblePlain, visibleGradient, showSpace, done };
+}
+
 function SectionLabel({ children }: { children: React.ReactNode }) {
+  const reveal = useScrollReveal<HTMLParagraphElement>();
   return (
-    <p className="text-center label-micro text-[var(--color-text-muted)]">
+    <p
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`text-center label-micro text-[var(--color-text-muted)] ${reveal.className}`}
+    >
       {children}
     </p>
   );
 }
 
+function ServiceCard({
+  svc,
+  status,
+  delay,
+}: {
+  svc: string;
+  status: ServiceHealth | null | undefined;
+  delay: number;
+}) {
+  const reveal = useScrollReveal<HTMLDivElement>(delay);
+  const dotState =
+    status === undefined
+      ? "neutral"
+      : status === null
+        ? "neutral"
+        : status.health === "healthy"
+          ? "healthy"
+          : status.health === "starting"
+            ? "warning"
+            : "critical";
+  const label = status === undefined ? "Checking…" : status === null ? "Unavailable" : status.health;
+
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`glow-card flex flex-col items-center gap-3 bg-[var(--color-bg-surface)] py-8 sm:py-10 ${reveal.className}`}
+    >
+      <span className="text-[15px] font-medium tracking-tight text-[var(--color-text-primary)] text-center">
+        {serviceDisplayName(svc)}
+      </span>
+      <div className="flex items-center gap-2">
+        <StatusDot state={dotState} size="md" pulse={dotState === "healthy"} />
+        <span
+          className={`text-[13px] font-medium capitalize ${
+            dotState === "healthy"
+              ? "text-[var(--color-status-healthy)]"
+              : dotState === "critical"
+                ? "text-[var(--color-accent-red)]"
+                : "text-[var(--color-text-muted)]"
+          }`}
+        >
+          {label}
+        </span>
+      </div>
+      {status?.version && (
+        <span className="font-mono text-[11px] text-[var(--color-text-faint)]">{status.version}</span>
+      )}
+    </div>
+  );
+}
+
+function FlowArrow({ delay }: { delay: number }) {
+  const reveal = useScrollReveal<HTMLDivElement>(delay);
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      aria-hidden
+      className={`flex items-center md:self-center ${reveal.className}`}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        className="h-4 w-4 rotate-90 text-[var(--color-text-faint)] md:rotate-0 md:mx-2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      >
+        <path d="M5 12h14m0 0-5-5m5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </div>
+  );
+}
+
+function FlowStepCard({
+  step,
+  index,
+  delay,
+}: {
+  step: { stage: string; caption: string };
+  index: number;
+  delay: number;
+}) {
+  const reveal = useScrollReveal<HTMLDivElement>(delay);
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`glow-card flex flex-col items-center gap-2 bg-[var(--color-bg-surface)] px-5 py-6 text-center md:flex-1 ${reveal.className}`}
+    >
+      <span className="font-mono text-[10px] tracking-[0.2em] text-[var(--color-text-faint)]">
+        {String(index + 1).padStart(2, "0")}
+      </span>
+      <span className="text-[13px] font-semibold text-[var(--color-text-primary)]">{step.stage}</span>
+      <span className="max-w-[200px] text-[12px] leading-relaxed text-[var(--color-text-muted)]">
+        {step.caption}
+      </span>
+    </div>
+  );
+}
+
 export default function Home() {
+  const headline = useTypedHeadline();
+  const incidentReveal = useScrollReveal<HTMLDivElement>();
   const [health, setHealth] = useState<Record<string, ServiceHealth | null> | null>(null);
   const [recent, setRecent] = useState<IncidentSummary[] | null>(null);
 
@@ -72,23 +213,35 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col">
       {/* ── header ── */}
-      <header className="sticky top-0 z-40 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]/75 backdrop-blur-xl">
+      <header className="glass-nav sticky top-0 z-40">
         <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between gap-4 px-6 sm:px-10">
-          {/* brand */}
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="relative grid h-8 w-8 shrink-0 place-items-center">
-              <div className="absolute inset-0 rounded-full border border-[rgba(54,215,232,0.15)]" />
-              <div className="absolute inset-[3px] rounded-full border border-dashed border-[rgba(255,77,103,0.15)]" />
-              <div className="h-2 w-2 rounded-full bg-[var(--color-accent-red)] opacity-80" />
-            </div>
-            <div className="leading-tight">
-              <div className="truncate text-[15px] font-semibold tracking-[0.1em] text-[var(--color-text-primary)]">
-                SYSTEM BACHAO
+          {/* brand + nav links */}
+          <div className="flex min-w-0 items-center gap-8">
+            <Link href="/" className="flex min-w-0 shrink-0 items-center gap-3">
+              <div className="relative grid h-8 w-8 shrink-0 place-items-center">
+                <div className="absolute inset-0 rounded-full border border-[rgba(54,215,232,0.15)]" />
+                <div className="absolute inset-[3px] rounded-full border border-dashed border-[rgba(255,77,103,0.15)]" />
+                <div className="h-2 w-2 rounded-full bg-[var(--color-accent-red)] opacity-80" />
               </div>
-              <div className="hidden text-[10px] tracking-[0.16em] text-[var(--color-text-faint)] sm:block">
-                AUTONOMOUS INCIDENT RESPONSE
+              <div className="leading-tight">
+                <div className="truncate text-[15px] font-semibold tracking-[0.1em] text-[var(--color-text-primary)]">
+                  SYSTEM BACHAO
+                </div>
+                <div className="hidden text-[10px] tracking-[0.16em] text-[var(--color-text-faint)] sm:block">
+                  AUTONOMOUS INCIDENT RESPONSE
+                </div>
               </div>
-            </div>
+            </Link>
+            <nav className="hidden items-center gap-6 md:flex">
+              <a
+                href="https://github.com/XDCIndia/autonomous-incident-response"
+                target="_blank"
+                rel="noreferrer"
+                className="nav-link"
+              >
+                GitHub ↗
+              </a>
+            </nav>
           </div>
 
           {/* status + theme + action */}
@@ -109,68 +262,42 @@ export default function Home() {
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 pb-32 pt-20 sm:px-10 sm:pt-28">
         {/* ── hero ── */}
-        <section className="anim-rise text-center" style={{ animationDelay: "0ms" }}>
-          <p className="label-micro text-[var(--color-accent-cyan)] opacity-60">
+        <section className="text-center">
+          <p className="anim-slide-up label-micro text-[var(--color-accent-cyan)] opacity-60">
             Autonomous Enterprise Incident Response
           </p>
           <h1 className="mx-auto mt-5 max-w-3xl text-[40px] font-semibold leading-[1.08] tracking-[-0.03em] text-[var(--color-text-primary)] sm:text-6xl lg:text-[64px]">
-            Your system.{" "}
+            {headline.visiblePlain}
+            {headline.showSpace && " "}
             <span className="bg-gradient-to-r from-[var(--color-accent-cyan)] via-[var(--color-accent-teal)] to-[var(--color-accent-purple)] bg-clip-text text-transparent">
-              Protected by AI.
+              {headline.visibleGradient}
+              {!headline.done && <span className="cursor-block" aria-hidden="true" />}
+              {headline.done && (
+                <>
+                  {" "}
+                  <span className="hero-ai-reveal">AI</span>
+                </>
+              )}
             </span>
           </h1>
-          <p className="mx-auto mt-6 max-w-lg text-[15px] leading-relaxed text-[var(--color-text-secondary)] sm:text-[16px]">
+          {/* Reveals in lockstep with the eyebrow above (same delay) rather
+              than waiting on the headline's typing effect to finish. */}
+          <p
+            className="anim-slide-down mx-auto mt-6 max-w-lg text-[15px] leading-relaxed text-[var(--color-text-secondary)] sm:text-[16px]"
+            style={{ animationDelay: "0ms" }}
+          >
             When something breaks, System Bachao detects it, finds the root cause
-            and fixes it — with a fully explainable record.
+            and fixes it — with a fully explainable record
           </p>
         </section>
 
         {/* ── system status ── */}
         <section className="anim-rise mt-24 sm:mt-32" style={{ animationDelay: "100ms" }}>
           <SectionLabel>System Status</SectionLabel>
-          <div className="mx-auto mt-8 grid max-w-3xl grid-cols-1 divide-y divide-[var(--color-border-subtle)] border-y border-[var(--color-border-subtle)] sm:grid-cols-4 sm:divide-x sm:divide-y-0">
-            {KNOWN_SERVICES.map((svc) => {
-              const status = health?.[svc];
-              const dotState =
-                status === undefined
-                  ? "neutral"
-                  : status === null
-                    ? "neutral"
-                    : status.health === "healthy"
-                      ? "healthy"
-                      : status.health === "starting"
-                        ? "warning"
-                        : "critical";
-              const label =
-                status === undefined ? "Checking…" : status === null ? "Unavailable" : status.health;
-              return (
-                <div
-                  key={svc}
-                  className="group flex flex-col items-center gap-3 py-8 transition-colors duration-200 hover:bg-[var(--color-bg-surface)] sm:py-10"
-                >
-                  <span className="text-[15px] font-medium tracking-tight text-[var(--color-text-primary)] text-center">
-                    {serviceDisplayName(svc)}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <StatusDot state={dotState} size="md" pulse={dotState === "healthy"} />
-                    <span
-                      className={`text-[13px] font-medium capitalize ${
-                        dotState === "healthy"
-                          ? "text-[var(--color-status-healthy)]"
-                          : dotState === "critical"
-                            ? "text-[var(--color-accent-red)]"
-                            : "text-[var(--color-text-muted)]"
-                      }`}
-                    >
-                      {label}
-                    </span>
-                  </div>
-                  {status?.version && (
-                    <span className="font-mono text-[11px] text-[var(--color-text-faint)]">{status.version}</span>
-                  )}
-                </div>
-              );
-            })}
+          <div className="mx-auto mt-8 grid max-w-3xl grid-cols-1 gap-4 sm:grid-cols-4">
+            {KNOWN_SERVICES.map((svc, i) => (
+              <ServiceCard key={svc} svc={svc} status={health?.[svc]} delay={i * 90} />
+            ))}
           </div>
         </section>
 
@@ -180,28 +307,8 @@ export default function Home() {
           <div className="mt-10 flex flex-col items-center gap-6 md:flex-row md:items-start md:justify-between md:gap-0">
             {FLOW.map((step, i) => (
               <Fragment key={step.stage}>
-                {i > 0 && (
-                  <div aria-hidden className="flex items-center md:self-center">
-                    <svg
-                      viewBox="0 0 24 24"
-                      className="h-4 w-4 rotate-90 text-[var(--color-text-faint)] md:rotate-0 md:mx-2"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                    >
-                      <path d="M5 12h14m0 0-5-5m5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </div>
-                )}
-                <div className="flex flex-col items-center gap-2 text-center md:flex-1 md:px-3">
-                  <span className="font-mono text-[10px] tracking-[0.2em] text-[var(--color-text-faint)]">
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
-                  <span className="text-[13px] font-semibold text-[var(--color-text-primary)]">{step.stage}</span>
-                  <span className="max-w-[200px] text-[12px] leading-relaxed text-[var(--color-text-muted)]">
-                    {step.caption}
-                  </span>
-                </div>
+                {i > 0 && <FlowArrow delay={i * 90 - 45} />}
+                <FlowStepCard step={step} index={i} delay={i * 90} />
               </Fragment>
             ))}
           </div>
@@ -211,7 +318,11 @@ export default function Home() {
         <section className="anim-rise mt-24 sm:mt-32" style={{ animationDelay: "300ms" }}>
           <div className="mx-auto max-w-3xl">
             <SectionLabel>Recent Incident</SectionLabel>
-            <div className="mt-6 rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-6 py-6 transition-colors duration-200 hover:border-[var(--color-border-emphasis)] sm:px-8 sm:py-7">
+            <div
+              ref={incidentReveal.ref}
+              style={incidentReveal.style}
+              className={`glow-card mt-6 bg-[var(--color-bg-surface)] px-6 py-6 sm:px-8 sm:py-7 ${incidentReveal.className}`}
+            >
               {recent === null ? (
                 <p className="text-center text-[13px] text-[var(--color-text-muted)]">Loading…</p>
               ) : !latest ? (
