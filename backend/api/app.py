@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from backend.contracts import Incident, IncidentState, TelemetryEvent, RemediationRequest
 from backend.monitoring import targets as target_store
+from backend.monitoring.ssrf_guard import SSRFValidationError, validate_target_url
 from backend.monitoring.url_monitor import TargetMonitor
 from backend.orchestrator import IncidentOrchestrator, get_orchestrator, configure_orchestrator
 from backend.platform.config import get_settings
@@ -391,7 +392,20 @@ async def create_target(request: TargetCreateRequest):
     Once monitoring_enabled and checked failure_threshold times in a row,
     a genuine Incident is created and run through the same orchestrator
     every simulator scenario uses — see backend.monitoring.url_monitor.
+
+    The URL is validated up front (scheme + DNS resolution + IP-range
+    check) so a target that would only ever reach an internal/loopback/
+    cloud-metadata address is rejected immediately with a clear error,
+    rather than stored and silently failing forever. This is a pre-flight
+    convenience only — the authoritative check runs again on every real
+    connection (see backend.monitoring.ssrf_guard), since DNS can change
+    after creation.
     """
+    try:
+        await validate_target_url(request.url)
+    except SSRFValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     storage = get_storage()
     target = await target_store.create_target(storage, request.name, request.url)
     return target.model_dump(mode="json")

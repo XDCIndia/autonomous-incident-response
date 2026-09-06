@@ -274,6 +274,14 @@ class MonitoredTarget(BaseModel):
     last_status_code: Optional[int] = None
     last_latency_ms: Optional[float] = None
     last_error: Optional[str] = None
+    # Deterministic classification of the last failed check, from the actual
+    # exception/response — never guessed. None on a healthy check.
+    last_failure_type: Optional[str] = None  # "timeout" | "connection_error" | "http_error" | None
+    last_body_size_bytes: Optional[int] = None
+    # Set only when a check genuinely observes the target come back up after
+    # a real failing streak (never on a brand-new target's first healthy
+    # check, which was never down) — see TargetMonitor._check_target.
+    last_recovered_at: Optional[datetime] = None
     active_incident_id: Optional[str] = None
     # True from the moment an incident is created for the CURRENT outage
     # until the URL genuinely recovers (a successful health check) —

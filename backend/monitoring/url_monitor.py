@@ -21,6 +21,7 @@ import httpx
 
 from backend.contracts import Incident, IncidentState, MonitoredTarget, TelemetryEvent
 from backend.monitoring import targets as target_store
+from backend.monitoring.ssrf_guard import build_safe_transport
 
 if TYPE_CHECKING:
     from backend.orchestrator.pipeline import IncidentOrchestrator
@@ -43,17 +44,50 @@ async def check_url_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
     doesn't mean the app is down, it just means that path doesn't exist.
     Only 5xx, timeouts, and connection failures count as unhealthy, matching
     standard uptime-monitoring convention.
+
+    Returns a dict with, beyond the original success/status_code/latency_ms/
+    error fields:
+      - failure_type: None on success, else one of "timeout" (the request
+        itself timed out), "connection_error" (DNS/refused/reset/SSRF-blocked/
+        any other transport failure), or "http_error" (a real 5xx response
+        was received). Distinguishing these deterministically — from the
+        actual exception type, never guessed from the error string — is what
+        lets the incident this produces carry a real reason instead of just
+        "it broke".
+      - body_size_bytes: len(response.content) when a response was actually
+        received, else None. Best-effort: falls back to None rather than
+        raising if a response object doesn't expose .content (real httpx
+        responses always do; this only guards non-httpx test doubles).
     """
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True, transport=build_safe_transport()
+        ) as client:
             resp = await client.get(url)
         latency_ms = (time.monotonic() - start) * 1000
+        success = resp.status_code < 500
+        try:
+            body_size_bytes = len(resp.content)
+        except AttributeError:
+            body_size_bytes = None
         return {
-            "success": resp.status_code < 500,
+            "success": success,
             "status_code": resp.status_code,
             "latency_ms": round(latency_ms, 1),
             "error": None,
+            "failure_type": None if success else "http_error",
+            "body_size_bytes": body_size_bytes,
+        }
+    except httpx.TimeoutException as exc:
+        latency_ms = (time.monotonic() - start) * 1000
+        return {
+            "success": False,
+            "status_code": None,
+            "latency_ms": round(latency_ms, 1),
+            "error": str(exc),
+            "failure_type": "timeout",
+            "body_size_bytes": None,
         }
     except Exception as exc:
         latency_ms = (time.monotonic() - start) * 1000
@@ -62,6 +96,8 @@ async def check_url_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
             "status_code": None,
             "latency_ms": round(latency_ms, 1),
             "error": str(exc),
+            "failure_type": "connection_error",
+            "body_size_bytes": None,
         }
 
 
@@ -71,15 +107,38 @@ def _build_incident_signals(target: MonitoredTarget, result: dict[str, Any]) -> 
     bucket: we have zero visibility into a black-box external URL's
     deployments/DB/CPU, so guessing a more specific root cause would be
     fabricated, not observed.
+
+    Every signal's metadata carries the same shared_metadata block —
+    status_code, failure_type, body_size_bytes, consecutive_failures,
+    checked_at, target_url — all deterministically observed by
+    check_url_health, never inferred or guessed. This is what lets the
+    incident detail UI (and any future, smarter investigator) show real
+    operational evidence beyond a single log line.
     """
     now = datetime.now(timezone.utc)
+    failure_type = result.get("failure_type")
 
-    if result["error"]:
-        log_message = f"Health check for {target.url} failed: {result['error']}"
-    elif result["status_code"] is not None and result["status_code"] >= 500:
+    if failure_type == "timeout":
+        log_message = f"Health check for {target.url} timed out: {result['error']}"
+    elif failure_type == "http_error":
         log_message = f"{target.url} returned HTTP {result['status_code']}"
+    elif failure_type == "connection_error":
+        log_message = f"Health check for {target.url} failed: {result['error']}"
     else:
-        log_message = f"{target.url} did not respond within the health-check timeout"
+        # Defensive fallback only — every real failure path above sets a
+        # failure_type; this keeps evidence honest (not fabricated) if a
+        # future failure path is ever added without updating this mapping.
+        log_message = f"Health check for {target.url} failed"
+
+    shared_metadata = {
+        "root_cause_hint": "service_error",
+        "status_code": result.get("status_code"),
+        "failure_type": failure_type,
+        "body_size_bytes": result.get("body_size_bytes"),
+        "consecutive_failures": target.consecutive_failures,
+        "checked_at": now.isoformat(),
+        "target_url": target.url,
+    }
 
     signals = [
         TelemetryEvent(
@@ -87,7 +146,7 @@ def _build_incident_signals(target: MonitoredTarget, result: dict[str, Any]) -> 
             source=target.name,
             event_type="log_error",
             value=None,
-            metadata={"log_message": log_message, "root_cause_hint": "service_error"},
+            metadata={"log_message": log_message, **shared_metadata},
         ),
         TelemetryEvent(
             timestamp=now,
@@ -99,7 +158,7 @@ def _build_incident_signals(target: MonitoredTarget, result: dict[str, Any]) -> 
                     f"{target.consecutive_failures} consecutive failed health checks "
                     f"for {target.url}"
                 ),
-                "root_cause_hint": "service_error",
+                **shared_metadata,
             },
         ),
     ]
@@ -111,7 +170,8 @@ def _build_incident_signals(target: MonitoredTarget, result: dict[str, Any]) -> 
                 event_type="latency",
                 value=result["latency_ms"],
                 metadata={
-                    "log_message": f"Latency {result['latency_ms']}ms on last check of {target.url}"
+                    "log_message": f"Latency {result['latency_ms']}ms on last check of {target.url}",
+                    **shared_metadata,
                 },
             )
         )
@@ -168,13 +228,22 @@ class TargetMonitor:
         target.last_status_code = result["status_code"]
         target.last_latency_ms = result["latency_ms"]
         target.last_error = result["error"]
+        target.last_failure_type = result.get("failure_type")
+        target.last_body_size_bytes = result.get("body_size_bytes")
 
         if result["success"]:
+            was_unhealthy = target.health_status == "unhealthy" or target.consecutive_failures > 0
             target.consecutive_failures = 0
             target.health_status = "healthy"
             # Genuine recovery — re-arm. A future new failure streak is a
             # new outage and may create a new incident.
             target.incident_reported = False
+            if was_unhealthy:
+                # Real recovery evidence: this check actually observed the
+                # target come back up after a genuine failing streak — never
+                # set on the very first-ever healthy check of a brand-new
+                # target, which was never "down" in the first place.
+                target.last_recovered_at = target.last_checked_at
         else:
             target.consecutive_failures += 1
             target.health_status = "unhealthy"

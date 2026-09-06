@@ -8,6 +8,7 @@ target CRUD and incident persistence behave exactly like production.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 import backend.monitoring.url_monitor as url_monitor_module
@@ -20,6 +21,17 @@ from backend.platform.storage import Storage
 class _FakeResponse:
     def __init__(self, status_code: int):
         self.status_code = status_code
+
+
+class _FakeResponseWithBody:
+    """Like _FakeResponse but with a real .content, for body_size_bytes
+    tests — kept separate from _FakeResponse so every pre-existing test
+    using the bare fake keeps proving the defensive-fallback path (no
+    .content attribute at all) still works."""
+
+    def __init__(self, status_code: int, content: bytes):
+        self.status_code = status_code
+        self.content = content
 
 
 class _FakeAsyncClient:
@@ -300,3 +312,203 @@ class TestTargetMonitorDetection:
         assert updated.consecutive_failures == 0
         assert updated.health_status == "unknown"
         assert orchestrator.run_calls == []
+
+
+class TestCheckUrlHealthEnrichment:
+    """Phase 2: richer, still-deterministic real signals — failure
+    classification and response size, never fabricated."""
+
+    @pytest.mark.asyncio
+    async def test_success_has_no_failure_type_and_reports_body_size(self, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(_FakeResponseWithBody(200, b"ok")),
+        )
+        result = await check_url_health("http://example.com")
+        assert result["success"] is True
+        assert result["failure_type"] is None
+        assert result["body_size_bytes"] == 2
+
+    @pytest.mark.asyncio
+    async def test_4xx_is_success_with_no_failure_type(self, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(_FakeResponseWithBody(404, b"not found")),
+        )
+        result = await check_url_health("http://example.com")
+        assert result["success"] is True
+        assert result["failure_type"] is None
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_classified_as_http_error(self, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(_FakeResponseWithBody(503, b"")),
+        )
+        result = await check_url_health("http://example.com")
+        assert result["success"] is False
+        assert result["failure_type"] == "http_error"
+        assert result["body_size_bytes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_response_without_content_attribute_falls_back_to_none_body_size(self, monkeypatch):
+        """Defensive fallback — a real httpx.Response always has .content,
+        this only guards against something unexpected rather than crashing
+        the whole health check over an enrichment field."""
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(200))
+        )
+        result = await check_url_health("http://example.com")
+        assert result["success"] is True
+        assert result["body_size_bytes"] is None
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_classified_distinctly_from_connection_error(self, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(raises=httpx.ConnectTimeout("timed out")),
+        )
+        result = await check_url_health("http://example.com")
+        assert result["success"] is False
+        assert result["failure_type"] == "timeout"
+        assert result["status_code"] is None
+        assert result["body_size_bytes"] is None
+
+    @pytest.mark.asyncio
+    async def test_connection_refused_is_classified_as_connection_error(self, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(raises=ConnectionError("refused")),
+        )
+        result = await check_url_health("http://example.com")
+        assert result["success"] is False
+        assert result["failure_type"] == "connection_error"
+
+
+class TestBuildIncidentSignalsEnrichment:
+    """The TelemetryEvent metadata an incident actually carries — evidence
+    the investigation/report stages and the frontend can show, all sourced
+    directly from a real check_url_health() result."""
+
+    @pytest.mark.asyncio
+    async def test_http_error_signals_carry_structured_metadata(self, storage, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(_FakeResponseWithBody(503, b"unhealthy")),
+        )
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=1)
+
+        await monitor.check_once()
+
+        incident = orchestrator.run_calls[0]
+        log_signal = next(s for s in incident.signals if s.event_type == "log_error")
+        assert log_signal.metadata["status_code"] == 503
+        assert log_signal.metadata["failure_type"] == "http_error"
+        assert log_signal.metadata["body_size_bytes"] == len(b"unhealthy")
+        assert log_signal.metadata["consecutive_failures"] == 1
+        assert log_signal.metadata["target_url"] == "http://example.com"
+        assert "checked_at" in log_signal.metadata
+        assert "returned HTTP 503" in log_signal.metadata["log_message"]
+
+    @pytest.mark.asyncio
+    async def test_timeout_signals_are_labeled_as_timeout_not_generic_failure(self, storage, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(raises=httpx.ConnectTimeout("deadline exceeded")),
+        )
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=1)
+
+        await monitor.check_once()
+
+        incident = orchestrator.run_calls[0]
+        log_signal = next(s for s in incident.signals if s.event_type == "log_error")
+        assert log_signal.metadata["failure_type"] == "timeout"
+        assert "timed out" in log_signal.metadata["log_message"]
+
+    @pytest.mark.asyncio
+    async def test_latency_signal_also_carries_shared_metadata(self, storage, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(_FakeResponseWithBody(500, b"")),
+        )
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=1)
+
+        await monitor.check_once()
+
+        incident = orchestrator.run_calls[0]
+        latency_signal = next(s for s in incident.signals if s.event_type == "latency")
+        assert latency_signal.metadata["failure_type"] == "http_error"
+        assert latency_signal.value is not None  # real observed latency, not fabricated
+
+
+class TestRecoveryTracking:
+    """last_recovered_at: genuine recovery evidence, never fabricated and
+    never set for a target that was never actually down."""
+
+    @pytest.mark.asyncio
+    async def test_brand_new_healthy_target_has_no_recovery_timestamp(self, storage, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(200))
+        )
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=3)
+
+        await monitor.check_once()
+
+        updated = await target_store.get_target(storage, target.id)
+        assert updated.last_recovered_at is None
+
+    @pytest.mark.asyncio
+    async def test_recovery_after_real_outage_sets_recovered_timestamp(self, storage, monkeypatch):
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=2)
+
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(500))
+        )
+        await monitor.check_once()
+        await monitor.check_once()
+
+        still_down = await target_store.get_target(storage, target.id)
+        assert still_down.last_recovered_at is None  # still down, not recovered yet
+
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(200))
+        )
+        await monitor.check_once()
+
+        recovered = await target_store.get_target(storage, target.id)
+        assert recovered.last_recovered_at is not None
+        assert recovered.last_recovered_at == recovered.last_checked_at
+
+    @pytest.mark.asyncio
+    async def test_staying_healthy_does_not_repeatedly_update_recovery_timestamp(self, storage, monkeypatch):
+        monkeypatch.setattr(
+            url_monitor_module.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(_FakeResponse(200))
+        )
+        target = await target_store.create_target(storage, "My App", "http://example.com")
+        orchestrator = FakeOrchestrator(storage)
+        monitor = TargetMonitor(storage, lambda: orchestrator, failure_threshold=3)
+
+        await monitor.check_once()
+        await monitor.check_once()
+        await monitor.check_once()
+
+        updated = await target_store.get_target(storage, target.id)
+        assert updated.last_recovered_at is None

@@ -91,32 +91,37 @@ async def verify_via_url(target_url: str) -> VerificationResult:
     directly — there's no docker container/host-port for an arbitrary
     external application, so this is a plain HTTP re-check, never a
     container-based multi-layer check.
-    """
-    import httpx
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            resp = await client.get(target_url)
-        verified = resp.status_code < 500
-        return VerificationResult(
-            verified=verified,
-            checks_passed=1 if verified else 0,
-            checks_total=1,
-            message=(
-                f"{target_url} responded {resp.status_code}"
-                if verified
-                else f"{target_url} still returning {resp.status_code}"
-            ),
-            recovered_metrics={"status_code": resp.status_code},
-        )
-    except Exception as e:
-        return VerificationResult(
-            verified=False,
-            checks_passed=0,
-            checks_total=1,
-            message=f"{target_url} still unreachable: {e}",
-            recovered_metrics={},
-        )
+    Delegates to check_url_health rather than making its own httpx call —
+    one real HTTP check implementation, one SSRF-safe-transport wiring, and
+    verification's recovered_metrics get the same real evidence (latency,
+    body size) the monitor loop's incident signals already carry, instead of
+    a second, thinner ad-hoc check.
+    """
+    from backend.monitoring.url_monitor import check_url_health
+
+    result = await check_url_health(target_url, timeout=5.0)
+    verified = result["success"]
+    recovered_metrics = {
+        "status_code": result["status_code"],
+        "latency_ms": result["latency_ms"],
+        "body_size_bytes": result["body_size_bytes"],
+    }
+
+    if verified:
+        message = f"{target_url} responded {result['status_code']} ({result['latency_ms']}ms)"
+    elif result["error"]:
+        message = f"{target_url} still unreachable: {result['error']}"
+    else:
+        message = f"{target_url} still returning {result['status_code']}"
+
+    return VerificationResult(
+        verified=verified,
+        checks_passed=1 if verified else 0,
+        checks_total=1,
+        message=message,
+        recovered_metrics=recovered_metrics,
+    )
 
 
 # ---------------------------------------------------------------------------
