@@ -179,6 +179,26 @@ class TestHealthAndBasicEndpointsStillWork:
             response = await client.get("/incidents")
             assert len(response.json()) == 4
 
+    @pytest.mark.asyncio
+    async def test_list_incidents_exposes_source_and_target_url(self):
+        """Phase 3: the dashboard needs to tell a real url_monitor incident
+        apart from a simulator-injected one without a second fetch per row."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/incidents/trigger",
+                json={"service_name": "svc-source-check", "scenario": "resource_exhaustion"},
+            )
+            assert resp.status_code == 200
+            await asyncio.sleep(1.0)
+
+            listed = await client.get("/incidents")
+            assert listed.status_code == 200
+            rows = listed.json()
+            assert len(rows) == 1
+            assert rows[0]["source"] == "simulator"
+            assert "target_url" in rows[0]
+
 
 class TestWebSocketLiveTimeline:
     """Uses one sync starlette TestClient for the whole test — its background
