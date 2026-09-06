@@ -151,6 +151,7 @@ export interface Incident {
   target_url: string | null;
   service_name: string;
   service_url: string | null;
+  source: IncidentSource;
   state: IncidentState;
   severity: SeverityLevel | null;
   autonomy_level: AutonomyLevel | null;
