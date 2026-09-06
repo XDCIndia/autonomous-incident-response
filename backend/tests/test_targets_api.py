@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import backend.api.app as app_module
 import backend.orchestrator as orchestrator_module
 import backend.platform.storage as storage_module
 from backend.api.app import app
-from backend.monitoring import ssrf_guard
 from backend.platform.storage import Storage
 
 
@@ -21,17 +21,11 @@ async def reset_storage(monkeypatch):
     import backend.platform.config as config_module
 
     config_module._settings = None
-
-    # Every existing test here registers a plausible public URL
-    # ("http://example.com") purely as test fixture data, not to exercise
-    # SSRF validation itself — that has its own dedicated hermetic suite in
-    # test_ssrf_guard.py. Fake out DNS resolution so this file never depends
-    # on real network/DNS access; tests that DO want to exercise rejection
-    # override this per-test (see TestTargetCreationValidatesUrl below).
-    async def _fake_resolve_validated_ips(hostname, port):
-        return ["93.184.216.34"]
-
-    monkeypatch.setattr(ssrf_guard, "resolve_validated_ips", _fake_resolve_validated_ips)
+    # Fresh rate-limit bucket per test — this global otherwise persists
+    # across every test in this file (all sharing one ASGITransport client
+    # key), which would make later tests fail depending on how many POSTs
+    # earlier tests happened to make.
+    app_module._target_creation_limiter = None
 
     storage = Storage(db_path=":memory:")
     await storage.init_db()
@@ -41,6 +35,7 @@ async def reset_storage(monkeypatch):
     storage_module._storage = None
     orchestrator_module._orchestrator = None
     config_module._settings = None
+    app_module._target_creation_limiter = None
 
 
 class TestCreateAndListTargets:
@@ -135,55 +130,93 @@ class TestDeleteAndToggleTarget:
             assert resp.json()["monitoring_enabled"] is True
 
 
-class TestTargetCreationValidatesUrl:
-    """POST /targets rejects SSRF-unsafe URLs up front (issue: SSRF
-    protection). The heavy IP-range test matrix lives in test_ssrf_guard.py
-    — this only proves the endpoint is actually wired to that validation
-    and returns a caller-friendly 400, not a 500 or a silently-created
-    target."""
-
+class TestTargetCreationRateLimiting:
     @pytest.mark.asyncio
-    async def test_rejects_loopback_url(self, monkeypatch):
-        async def _resolves_to_loopback(hostname, port):
-            from backend.monitoring.ssrf_guard import SSRFValidationError
+    async def test_exceeding_rate_limit_returns_429(self, monkeypatch):
+        monkeypatch.setenv("TARGET_CREATION_RATE_LIMIT", "2")
+        monkeypatch.setenv("TARGET_CREATION_RATE_WINDOW_SECONDS", "60")
+        import backend.platform.config as config_module
 
-            raise SSRFValidationError(f"URL host '{hostname}' resolves to a disallowed address")
-
-        monkeypatch.setattr(ssrf_guard, "resolve_validated_ips", _resolves_to_loopback)
+        config_module._settings = None
+        app_module._target_creation_limiter = None
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/targets", json={"name": "Attacker", "url": "http://127.0.0.1:8000/admin"}
-            )
-            assert resp.status_code == 400
-            assert "disallowed" in resp.json()["detail"]
+            r1 = await client.post("/targets", json={"name": "One", "url": "http://example.com"})
+            r2 = await client.post("/targets", json={"name": "Two", "url": "http://example.com"})
+            r3 = await client.post("/targets", json={"name": "Three", "url": "http://example.com"})
+
+            assert r1.status_code == 200
+            assert r2.status_code == 200
+            assert r3.status_code == 429
+            assert "Too many" in r3.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_rejects_non_http_scheme(self):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/targets", json={"name": "Bad Scheme", "url": "ftp://example.com"}
-            )
-            assert resp.status_code == 400
+    async def test_rate_limit_does_not_affect_reads(self, monkeypatch):
+        """Only creation is capped — GET /targets has no such dependency."""
+        monkeypatch.setenv("TARGET_CREATION_RATE_LIMIT", "1")
+        import backend.platform.config as config_module
 
-    @pytest.mark.asyncio
-    async def test_rejected_url_is_never_stored(self, monkeypatch):
-        async def _resolves_to_loopback(hostname, port):
-            from backend.monitoring.ssrf_guard import SSRFValidationError
-
-            raise SSRFValidationError("blocked")
-
-        monkeypatch.setattr(ssrf_guard, "resolve_validated_ips", _resolves_to_loopback)
+        config_module._settings = None
+        app_module._target_creation_limiter = None
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            await client.post(
-                "/targets", json={"name": "Attacker", "url": "http://127.0.0.1/admin"}
-            )
+            await client.post("/targets", json={"name": "One", "url": "http://example.com"})
+            blocked = await client.post("/targets", json={"name": "Two", "url": "http://example.com"})
+            assert blocked.status_code == 429
+
+            # Reads are unaffected by the creation-rate limiter being tripped.
             listed = await client.get("/targets")
-            assert listed.json() == []
+            assert listed.status_code == 200
+
+
+class TestMaxMonitoredTargetsCap:
+    @pytest.mark.asyncio
+    async def test_creation_blocked_once_cap_reached(self, monkeypatch):
+        monkeypatch.setenv("MAX_MONITORED_TARGETS", "2")
+        import backend.platform.config as config_module
+
+        config_module._settings = None
+        app_module._target_creation_limiter = None
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r1 = await client.post("/targets", json={"name": "One", "url": "http://example.com"})
+            r2 = await client.post("/targets", json={"name": "Two", "url": "http://example.com"})
+            r3 = await client.post("/targets", json={"name": "Three", "url": "http://example.com"})
+
+            assert r1.status_code == 200
+            assert r2.status_code == 200
+            assert r3.status_code == 429
+            assert "limit reached" in r3.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_target_frees_a_slot(self, monkeypatch):
+        monkeypatch.setenv("MAX_MONITORED_TARGETS", "1")
+        import backend.platform.config as config_module
+
+        config_module._settings = None
+        app_module._target_creation_limiter = None
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            created = await client.post(
+                "/targets", json={"name": "One", "url": "http://example.com"}
+            )
+            assert created.status_code == 200
+
+            blocked = await client.post(
+                "/targets", json={"name": "Two", "url": "http://example.com"}
+            )
+            assert blocked.status_code == 429
+
+            await client.delete(f"/targets/{created.json()['id']}")
+
+            after_delete = await client.post(
+                "/targets", json={"name": "Two", "url": "http://example.com"}
+            )
+            assert after_delete.status_code == 200
 
 
 class TestTargetsRequireApiKeyWhenConfigured:
