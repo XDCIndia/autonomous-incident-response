@@ -94,8 +94,12 @@ async def verify_via_url(target_url: str) -> VerificationResult:
     """
     import httpx
 
+    from backend.monitoring.ssrf_guard import build_safe_transport
+
     try:
-        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=5.0, follow_redirects=True, transport=build_safe_transport()
+        ) as client:
             resp = await client.get(target_url)
         verified = resp.status_code < 500
         return VerificationResult(
