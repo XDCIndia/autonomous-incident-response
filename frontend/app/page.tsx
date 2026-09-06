@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, useCallback } from "react";
+import Image from "next/image";
+import { useEffect, useRef, useState, useCallback, useSyncExternalStore } from "react";
 import { Button, Chip, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { TerminalMock } from "@/components/TerminalMock";
@@ -24,60 +25,20 @@ function serviceDisplayName(key: string): string {
     .join(" ");
 }
 
-/* ── Hero headline — staggered word reveal ──
-   Each word is a span with its own entrance delay. The gradient half uses
-   background-clip: text, so words are wrapped in inline spans that inherit
-   the clip from the parent. This replaces the character-by-character
-   typewriter, which felt gimmicky for an enterprise SaaS audience. */
-
-const HERO_WORDS_PLAIN = ["Your", "system."];
-const HERO_WORDS_GRADIENT = ["Protected", "by", "AI"];
+/* ── Hero headline — clean two-line premium SaaS composition ──
+   Line 1: "Your system." (solid)
+   Line 2: "Protected by AI" (gradient-emphasized)
+   No per-word animations, no stagger delays — the entire headline
+   fades up as one unit so nothing can disappear, clip, or wrap wrong.
+   The gradient uses background-clip: text on an inline span (not
+   inline-block) so it inherits the line box correctly and never
+   breaks the rendering context. */
 
 function HeroHeadline() {
-  // Word reveal uses CSS `animation` (not `transition`) with the modern
-  // `translate` property in @keyframes. Unlike `transform`, `translate`
-  // does not create a new rendering context, so `background-clip: text`
-  // on each gradient word stays intact.
-  // Each word gets its own animation-delay for the staggered entrance.
-  // No JS state needed — pure CSS, reliable on initial load and refresh.
-  const wordBase = "inline";
-  const gradientCls =
-    "bg-gradient-to-r from-[var(--color-accent-cyan)] via-[var(--color-accent-teal)] to-[var(--color-accent-purple)] bg-clip-text text-transparent";
-  const delays = ["0ms", "90ms", "180ms", "270ms", "360ms"];
-
-  let wordIndex = 0;
-
   return (
-    <h1 className="hero-h1 mx-auto mt-5 max-w-3xl text-[40px] font-semibold leading-[1.08] tracking-[-0.03em] text-[var(--color-text-primary)] sm:text-6xl lg:text-[64px]">
-      {HERO_WORDS_PLAIN.map((word, i) => {
-        const d = delays[wordIndex];
-        wordIndex++;
-        return (
-          <span
-            key={`plain-${i}`}
-            className={wordBase}
-            style={{ animationDelay: d }}
-          >
-            {word}
-            {i < HERO_WORDS_PLAIN.length - 1 && "\u00A0"}
-          </span>
-        );
-      })}
-      {"\u00A0"}
-      {HERO_WORDS_GRADIENT.map((word, i) => {
-        const d = delays[wordIndex];
-        wordIndex++;
-        return (
-          <span
-            key={`grad-${i}`}
-            className={`${wordBase} ${gradientCls}`}
-            style={{ animationDelay: d }}
-          >
-            {word}
-            {i < HERO_WORDS_GRADIENT.length - 1 && "\u00A0"}
-          </span>
-        );
-      })}
+    <h1 className="hero-title mx-auto mt-6 max-w-5xl text-[42px] font-bold leading-[1.1] tracking-[-0.03em] sm:text-[56px] lg:text-[64px]">
+      <span className="hero-line-solid">Your system.</span>{" "}
+      <span className="hero-line-gradient">Protected by AI</span>
     </h1>
   );
 }
@@ -358,34 +319,177 @@ function FlowPipeline({ progress }: { progress: number }) {
   );
 }
 
-/* ── Scroll progress hook (local implementation for landing page) ── */
+/* ── Visual storytelling: AI response journey ── */
+
+const STORY = [
+  {
+    step: "01",
+    title: "AI detects an anomaly",
+    caption: "Real-time signals reveal a service failure within seconds.",
+    image: "/assets/story-detect.jpg",
+    alt: "AI anomaly detection visualization",
+  },
+  {
+    step: "02",
+    title: "AI investigates and identifies root cause",
+    caption: "Evidence is gathered across logs, metrics, and traces to pinpoint the exact failure point.",
+    image: "/assets/story-investigate.jpg",
+    alt: "AI root cause investigation visualization",
+  },
+  {
+    step: "03",
+    title: "AI executes safe remediation",
+    caption: "A targeted fix is applied autonomously — no human intervention required.",
+    image: "/assets/story-remediate.jpg",
+    alt: "AI remediation execution visualization",
+  },
+  {
+    step: "04",
+    title: "System recovers and verifies health",
+    caption: "Post-recovery checks confirm the service is stable and performing as expected.",
+    image: "/assets/story-recover.jpg",
+    alt: "System health verification visualization",
+  },
+];
+
+function StoryCard({
+  item,
+  progress,
+  index,
+}: {
+  item: (typeof STORY)[number];
+  progress: number;
+  index: number;
+}) {
+  // Each card occupies a window in the overall section progress.
+  // Windows overlap significantly for continuous feel — next card enters
+  // while current card is still settling.
+  const windowSize = 0.4;
+  const step = 0.15; // spacing between card starts
+  const cardStart = 0.02 + index * step;
+  const cardEnd = cardStart + windowSize;
+
+  // Local progress for this card: 0 → entering, 0.5 → settled, 1 → exiting
+  const localSp = Math.max(0, Math.min(1, (progress - cardStart) / (cardEnd - cardStart)));
+
+  // Entry phase: card slides in from below with horizontal drift (0 → 0.3)
+  const entrySp = Math.max(0, Math.min(1, localSp / 0.3));
+  const entryEased = 1 - Math.pow(1 - entrySp, 3);
+
+  // Settle phase: card gently scales up to final position (0.2 → 0.55)
+  const settleSp = Math.max(0, Math.min(1, (localSp - 0.2) / 0.35));
+  const settleEased = 1 - Math.pow(1 - settleSp, 2);
+
+  // Exit phase: card drifts up and fades as next takes over (0.8 → 1.0)
+  const exitSp = Math.max(0, Math.min(1, (localSp - 0.8) / 0.2));
+  const exitEased = exitSp * exitSp; // ease-in for exit
+
+  // Combine phases into final transforms
+  // Entry: slide up from 60px, alternating horizontal offset for visual rhythm
+  const entryY = (1 - entryEased) * 60;
+  const entryX = (1 - entryEased) * (index % 2 === 0 ? 25 : -25);
+
+  // Settle: subtle scale from 0.96 to 1
+  const settleScale = 0.96 + settleEased * 0.04;
+
+  // Exit: drift up and scale down slightly
+  const exitY = exitEased * -25;
+  const exitScale = 1 - exitEased * 0.02;
+
+  // Parallax on image: subtle horizontal shift follows card progress
+  const imageParallaxX = (localSp - 0.5) * 15;
+
+  // Text follows with slight lag (starts after image, finishes before exit)
+  const textLag = Math.max(0, Math.min(1, (localSp - 0.08) / 0.45));
+  const textEased = 1 - Math.pow(1 - textLag, 2);
+  const textY = (1 - textEased) * 20;
+
+  // Image scale: starts slightly zoomed (1.06), settles to 1.0
+  const imageScale = 1.06 - settleEased * 0.06;
+
+  // Final opacity: fades in during entry, fades out during exit
+  const opacity = entryEased * (1 - exitEased);
+  const textOpacity = textEased * (1 - exitEased);
+
+  return (
+    <div
+      className="story-card-scroll"
+      style={{
+        "--story-opacity": opacity,
+        "--story-translate-x": `${entryX}px`,
+        "--story-translate-y": `${entryY + exitY}px`,
+        "--story-scale": settleScale * exitScale,
+        "--story-image-parallax": `${imageParallaxX}px`,
+        "--story-image-scale": imageScale,
+        "--story-text-y": `${textY}px`,
+        "--story-text-opacity": textOpacity,
+      } as React.CSSProperties}
+    >
+      <div className="story-image-wrapper">
+        <Image
+          src={item.image}
+          alt={item.alt}
+          width={800}
+          height={500}
+          className="story-image"
+          loading={index > 0 ? "lazy" : "eager"}
+        />
+        <div className="story-image-overlay" />
+      </div>
+      <div className="story-text">
+        <span className="story-step">{item.step}</span>
+        <h3 className="story-title">{item.title}</h3>
+        <p className="story-caption">{item.caption}</p>
+      </div>
+    </div>
+  );
+}
+
+/* ── Scroll progress hook (local implementation for landing page) ──
+   Uses useSyncExternalStore for guaranteed synchronous reads.
+   Each section gets its own store so components subscribe individually. */
 
 function useSectionProgress<T extends HTMLElement>() {
   const ref = useRef<T>(null);
-  const [progress, setProgress] = useState(0);
+  const listenersRef = useRef<Set<() => void>>(new Set());
+  const progressRef = useRef(0);
   const rafRef = useRef<number | undefined>(undefined);
   const lastP = useRef(0);
+
+  const subscribe = useCallback((listener: () => void) => {
+    listenersRef.current.add(listener);
+    return () => listenersRef.current.delete(listener);
+  }, []);
+
+  const getSnapshot = useCallback(() => progressRef.current, []);
+
+  const progress = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  const notify = useCallback(() => {
+    listenersRef.current.forEach((l) => l());
+  }, []);
 
   const update = useCallback(() => {
     const el = ref.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const vh = window.innerHeight;
-    const total = rect.height + vh;
-    const current = vh - rect.top;
-    const p = Math.max(0, Math.min(1, current / total));
+    const total = rect.height;
+    const scrolled = Math.max(0, -rect.top);
+    const p = Math.max(0, Math.min(1, scrolled / total));
     if (Math.abs(p - lastP.current) > 0.002) {
       lastP.current = p;
-      setProgress(p);
+      progressRef.current = p;
+      notify();
     }
-  }, []);
+  }, [notify]);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setProgress(1);
+      progressRef.current = 1;
+      notify();
       return;
     }
 
@@ -405,7 +509,7 @@ function useSectionProgress<T extends HTMLElement>() {
       window.removeEventListener("resize", onScroll);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [update]);
+  }, [update, notify]);
 
   return { ref, progress };
 }
@@ -422,6 +526,7 @@ export default function Home() {
   const statsSection = useSectionProgress<HTMLDivElement>();
   const servicesSection = useSectionProgress<HTMLDivElement>();
   const flowSection = useSectionProgress<HTMLDivElement>();
+  const storySection = useSectionProgress<HTMLDivElement>();
   const incidentSection = useSectionProgress<HTMLDivElement>();
 
   useEffect(() => {
@@ -522,7 +627,7 @@ export default function Home() {
       </header>
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 pb-32 sm:px-10">
-        {/* ── HERO: sticky section with progressive entrance + scroll-away fade ── */}
+        {/* ── HERO: clean composition with strong visual hierarchy ── */}
         <div ref={heroSection.ref} className="scroll-section" style={{ height: "180vh" }}>
           <div className="scroll-sticky" style={{ paddingTop: "80px" }}>
             <div
@@ -532,21 +637,28 @@ export default function Home() {
                 transform: `translateY(${heroTranslateY}px) scale(${heroScale})`,
               }}
             >
-              <p className="anim-slide-up label-micro text-[var(--color-accent-cyan)] opacity-60">
+              {/* eyebrow */}
+              <p className="anim-slide-up label-micro text-[var(--color-accent-cyan)] opacity-70">
                 Autonomous Enterprise Incident Response
               </p>
 
+              {/* headline */}
               <HeroHeadline />
 
+              {/* subtitle */}
               <p
-                className="anim-slide-down mx-auto mt-6 max-w-lg text-[15px] leading-relaxed text-[var(--color-text-secondary)] sm:text-[16px]"
-                style={{ animationDelay: "0ms" }}
+                className="anim-slide-down mx-auto mt-7 max-w-xl text-[15px] leading-[1.7] text-[var(--color-text-secondary)] sm:text-[17px]"
+                style={{ animationDelay: "150ms" }}
               >
-                When something breaks, System Bachao detects it, finds the root cause
-                and fixes it — with a fully explainable record
+                When something breaks, System Bachao detects it, finds the root
+                cause and fixes it — with a fully explainable record
               </p>
 
-              <div className="anim-rise mt-8 flex items-center justify-center gap-3" style={{ animationDelay: "500ms" }}>
+              {/* CTA */}
+              <div
+                className="anim-rise mt-10 flex items-center justify-center gap-4"
+                style={{ animationDelay: "300ms" }}
+              >
                 <Link href="/dashboard">
                   <Button variant="primary" size="lg">
                     Open Dashboard
@@ -613,6 +725,23 @@ export default function Home() {
             <SectionLabel>AI Response Flow</SectionLabel>
             <div className="mt-8 w-full">
               <FlowPipeline progress={flowSection.progress} />
+            </div>
+          </div>
+        </div>
+
+        {/* ── VISUAL STORY: AI response journey ── */}
+        <div ref={storySection.ref} className="scroll-section scroll-overlap" style={{ height: "160vh" }}>
+          <div className="scroll-sticky" style={{ paddingTop: "60px" }}>
+            <SectionLabel>How It Works</SectionLabel>
+            <div className="story-grid mx-auto mt-8 w-full max-w-4xl">
+              {STORY.map((item, i) => (
+                <StoryCard
+                  key={item.step}
+                  item={item}
+                  progress={storySection.progress}
+                  index={i}
+                />
+              ))}
             </div>
           </div>
         </div>
