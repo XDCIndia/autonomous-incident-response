@@ -45,7 +45,13 @@ const LAYER_DEFS: LayerDef[] = [
 const BG_RGB: [number, number, number] = [3, 6, 9];
 const PULSE_INTERVAL_FRAMES = 130;
 
-export function CineNetworkBackground() {
+interface CineNetworkBackgroundProps {
+  // "soft" (landing page) trims the canvas/frost blur down; other pages
+  // keep the original heavier blur.
+  blur?: "default" | "soft";
+}
+
+export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { theme } = useTheme();
 
@@ -215,10 +221,12 @@ export function CineNetworkBackground() {
     };
   }, [theme]);
 
+  const soft = blur === "soft";
+
   return (
     <>
-      <canvas ref={canvasRef} className="bg-canvas" aria-hidden />
-      <div className="bg-frost" aria-hidden />
+      <canvas ref={canvasRef} className={soft ? "bg-canvas bg-canvas--soft" : "bg-canvas"} aria-hidden />
+      <div className={soft ? "bg-frost bg-frost--soft" : "bg-frost"} aria-hidden />
     </>
   );
 }

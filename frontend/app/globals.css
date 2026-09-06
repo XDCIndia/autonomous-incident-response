@@ -277,6 +277,10 @@ body {
   filter: blur(0.6px);
 }
 
+.bg-canvas--soft {
+  filter: blur(0.3px);
+}
+
 .bg-frost {
   position: fixed;
   inset: 0;
@@ -285,6 +289,11 @@ body {
   background: rgba(255, 255, 255, 0.005);
   backdrop-filter: blur(1.2px);
   -webkit-backdrop-filter: blur(1.2px);
+}
+
+.bg-frost--soft {
+  backdrop-filter: blur(0.6px);
+  -webkit-backdrop-filter: blur(0.6px);
 }
 
 /* ============================================================

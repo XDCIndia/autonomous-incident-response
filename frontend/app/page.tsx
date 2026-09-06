@@ -213,7 +213,7 @@ export default function Home() {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <CineNetworkBackground />
+      <CineNetworkBackground blur="soft" />
       {/* ── header ── */}
       <header className="glass-nav sticky top-0 z-40">
         <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between gap-4 px-6 sm:px-10">

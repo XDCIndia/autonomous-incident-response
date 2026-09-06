@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { CineNetworkBackground } from "@/components/CineNetworkBackground";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
   ApiError,
@@ -406,6 +407,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen">
+      <CineNetworkBackground />
       {/* ── header ── */}
       <header className="glass-nav sticky top-0 z-40">
         <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-3">

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { IconCheck } from "@/components/icons";
+import { CineNetworkBackground } from "@/components/CineNetworkBackground";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
   ApiError,
@@ -134,6 +135,7 @@ export default function IncidentPage() {
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
   const incidentStateRef = useRef<string | null>(null);
 
@@ -231,10 +233,18 @@ export default function IncidentPage() {
       };
     };
 
-    connect();
+    // Deferred by a tick so React Strict Mode's dev-only double-invoke
+    // (mount → cleanup → mount) never opens a real socket on the first,
+    // immediately-discarded mount — that socket got torn down mid-handshake,
+    // which the browser logs as "WebSocket is closed before the connection
+    // is established" even though the app itself recovers fine via the
+    // reconnect-on-close logic below. The cleanup below cancels this timer
+    // before it fires, so only the second (real) mount ever connects.
+    connectTimerRef.current = setTimeout(connect, 0);
 
     return () => {
       mountedRef.current = false;
+      if (connectTimerRef.current) clearTimeout(connectTimerRef.current);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       wsRef.current?.close();
       wsRef.current = null;
@@ -290,6 +300,7 @@ export default function IncidentPage() {
 
   return (
     <div className="min-h-screen">
+      <CineNetworkBackground />
       {/* ── header ── */}
       <header className="glass-nav sticky top-0 z-40">
         <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5">
