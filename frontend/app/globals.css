@@ -222,6 +222,35 @@ body {
 }
 
 /* ============================================================
+   CINE NETWORK BACKGROUND (CineNetworkBackground.tsx)
+   ============================================================ */
+
+.bg-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  pointer-events: none;
+}
+
+.bg-canvas--soft {
+  z-index: -8;
+}
+
+.bg-frost {
+  position: fixed;
+  inset: 0;
+  z-index: -7;
+  pointer-events: none;
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.bg-frost--soft {
+  backdrop-filter: blur(1px);
+  -webkit-backdrop-filter: blur(1px);
+}
+
+/* ============================================================
    PREMIUM AI/SaaS BACKGROUND SYSTEM
    Layered, subtle, content-supporting depth.
    ============================================================ */
