@@ -21,6 +21,7 @@ import {
 import {
   KNOWN_SERVICES,
   SCENARIOS,
+  type IncidentSource,
   type IncidentSummary,
   type KnowledgeBaseResult,
   type MonitoredTarget,
@@ -55,6 +56,57 @@ function targetHealthDot(target: MonitoredTarget): "healthy" | "warning" | "crit
   if (target.health_status === "healthy") return "healthy";
   if (target.health_status === "unhealthy") return target.incident_reported ? "critical" : "warning";
   return "neutral";
+}
+
+/** Human-readable health state, distinguishing "still within the debounce
+ * window" (Degraded) from "crossed the failure threshold, incident
+ * created" (Down) — both map to the same backend health_status="unhealthy",
+ * but consecutive_failures/incident_reported already tell them apart. */
+function targetHealthLabel(target: MonitoredTarget): string {
+  if (!target.monitoring_enabled) return "Monitoring paused";
+  if (target.health_status === "unknown") return "Awaiting first check";
+  if (target.health_status === "healthy") return "Healthy";
+  return target.incident_reported ? "Down" : "Degraded";
+}
+
+const FAILURE_TYPE_LABEL: Record<string, string> = {
+  timeout: "Timed out",
+  connection_error: "Connection failed",
+  http_error: "Server error",
+};
+
+/** Real, observed evidence from the last check — never fabricated. Blank
+ * when the target is healthy or has never been checked. */
+function targetFailureDetail(target: MonitoredTarget): string | null {
+  if (target.health_status !== "unhealthy") return null;
+  const parts: string[] = [];
+  if (target.last_failure_type) {
+    const label = FAILURE_TYPE_LABEL[target.last_failure_type] ?? target.last_failure_type;
+    parts.push(target.last_status_code ? `${label} (HTTP ${target.last_status_code})` : label);
+  } else if (target.last_status_code) {
+    parts.push(`HTTP ${target.last_status_code}`);
+  }
+  if (target.last_latency_ms != null) parts.push(`${Math.round(target.last_latency_ms)}ms`);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function timeAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const seconds = Math.max(0, Math.round(diffMs / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function incidentSourceTone(source: IncidentSource): "info" | "neutral" {
+  return source === "url_monitor" ? "info" : "neutral";
+}
+
+function incidentSourceLabel(source: IncidentSource): string {
+  return source === "url_monitor" ? "URL Monitor" : "Simulator";
 }
 
 /**
@@ -171,6 +223,9 @@ function IncidentRow({
         </Link>
       </td>
       <td className="py-2.5 pr-4 text-[var(--color-text-primary)]">{serviceDisplayName(incident.service_name)}</td>
+      <td className="py-2.5 pr-4" title={incident.target_url ?? undefined}>
+        <Chip tone={incidentSourceTone(incident.source)}>{incidentSourceLabel(incident.source)}</Chip>
+      </td>
       <td className="py-2.5 pr-4">
         <Chip tone={stateTone(incident.state)}>{incident.state}</Chip>
       </td>
@@ -295,11 +350,19 @@ export default function Dashboard() {
       setAddTargetError("Both a name and a URL are required.");
       return;
     }
+    let parsedUrl: URL;
     try {
-      // eslint-disable-next-line no-new
-      new URL(url);
+      parsedUrl = new URL(url);
     } catch {
       setAddTargetError("Enter a valid URL, including the scheme (e.g. https://example.com).");
+      return;
+    }
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      setAddTargetError("Only http:// and https:// URLs can be monitored.");
+      return;
+    }
+    if (targets.data?.some((t) => t.url === url)) {
+      setAddTargetError("This URL is already being monitored.");
       return;
     }
 
@@ -601,13 +664,24 @@ export default function Dashboard() {
 
                       <div className="flex flex-wrap items-center gap-4">
                         <div className="text-right">
-                          <div className="font-mono text-[11px] text-[var(--color-text-muted)] capitalize">
-                            {target.health_status}
-                            {target.consecutive_failures > 0 && ` · ${target.consecutive_failures} failed check${target.consecutive_failures === 1 ? "" : "s"}`}
+                          <div className="text-[11px] font-medium text-[var(--color-text-secondary)]">
+                            {targetHealthLabel(target)}
+                            {target.consecutive_failures > 0 &&
+                              ` · ${target.consecutive_failures} failed check${target.consecutive_failures === 1 ? "" : "s"}`}
                           </div>
+                          {targetFailureDetail(target) && (
+                            <div className="font-mono text-[10px] text-[var(--color-accent-red)]">
+                              {targetFailureDetail(target)}
+                            </div>
+                          )}
                           {target.last_checked_at && (
                             <div className="font-mono text-[10px] text-[var(--color-text-faint)]">
                               last checked {new Date(target.last_checked_at).toLocaleTimeString()}
+                            </div>
+                          )}
+                          {target.health_status === "healthy" && target.last_recovered_at && (
+                            <div className="font-mono text-[10px] text-[var(--color-text-faint)]">
+                              recovered {timeAgo(target.last_recovered_at)}
                             </div>
                           )}
                         </div>
@@ -682,11 +756,12 @@ export default function Dashboard() {
             <p className="text-[13px] text-[var(--color-text-muted)]">No incidents yet. Trigger one above.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] border-collapse text-[13px]">
+              <table className="w-full min-w-[760px] border-collapse text-[13px]">
                 <thead>
                   <tr className="border-b border-[var(--color-border-subtle)] text-left">
                     <th className="pb-2 pr-4 label-micro font-normal">ID</th>
                     <th className="pb-2 pr-4 label-micro font-normal">Service</th>
+                    <th className="pb-2 pr-4 label-micro font-normal">Source</th>
                     <th className="pb-2 pr-4 label-micro font-normal">State</th>
                     <th className="pb-2 pr-4 label-micro font-normal">Severity</th>
                     <th className="pb-2 pr-4 label-micro font-normal">Stage</th>

@@ -795,6 +795,11 @@ async def list_incidents(limit: int = Query(50, ge=1, le=100)):
             "severity": inc.severity,
             "current_stage": inc.current_stage,
             "created_at": inc.created_at.isoformat(),
+            # Lets callers (the dashboard's incident list) distinguish a
+            # real url_monitor-detected incident from a simulator-injected
+            # one without fetching every incident's full detail first.
+            "source": inc.source,
+            "target_url": inc.target_url,
         }
         for inc in incidents
     ]
