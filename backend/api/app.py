@@ -183,10 +183,27 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown."""
     global docker_ctl, toxiproxy_ctl
     settings = get_settings()
+
+    # Fail closed outside development (issue: auth hardening). require_api_key
+    # silently no-ops on every mutating endpoint (/targets, /faults/inject,
+    # /remediation/execute, /incidents/trigger, approve/reject) whenever
+    # API_KEY is unset — a deliberate convenience for local dev and the test
+    # suite, never acceptable for anything actually reachable by anyone else.
+    # Refuse to boot rather than silently serve with that protection disabled.
+    app_env_mode = settings.app_env.strip().lower()
+    if app_env_mode != "development" and not settings.api_key.strip():
+        raise RuntimeError(
+            f"APP_ENV={settings.app_env!r} but API_KEY is not set — refusing to "
+            "start with authentication disabled on mutating endpoints "
+            "(/targets, /faults/inject, /remediation/execute, "
+            "/incidents/trigger, approve/reject). Set API_KEY, or set "
+            "APP_ENV=development for local development only."
+        )
+
     storage = get_storage()
     await storage.init_db()
     logger.info("Application started — env=%s", settings.app_env)
-    
+
     mode = settings.real_env.strip().lower()
 
     try:
