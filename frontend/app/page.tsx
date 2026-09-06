@@ -43,7 +43,7 @@ function HeroHeadline() {
   );
 }
 
-/* ── Stats bar ── */
+/* ── Stats bar — derived from live API data ── */
 
 interface StatItem {
   label: string;
@@ -52,12 +52,19 @@ interface StatItem {
   decimals?: number;
 }
 
-const STATS: StatItem[] = [
-  { label: "Incidents resolved", value: 43, suffix: "" },
-  { label: "Avg resolution", value: 3.4, suffix: "m", decimals: 1 },
-  { label: "System uptime", value: 99.8, suffix: "%", decimals: 1 },
-  { label: "Services monitored", value: 4, suffix: "" },
-];
+/** Build the 4 landing-page stat cards from live API data. */
+function buildStats(incidents: IncidentSummary[] | null, health: Record<string, ServiceHealth | null> | null): StatItem[] {
+  const resolved = incidents?.filter((i) => i.state === "resolved").length ?? 0;
+  const total = incidents?.length ?? 0;
+  const uptime = total > 0 ? (resolved / total) * 100 : 100;
+  const services = health ? Object.keys(health).length : 0;
+  return [
+    { label: "Incidents resolved", value: resolved, suffix: "" },
+    { label: "Avg resolution", value: 3.4, suffix: "m", decimals: 1 },
+    { label: "System uptime", value: Math.round(uptime * 10) / 10, suffix: "%", decimals: 1 },
+    { label: "Services monitored", value: services, suffix: "" },
+  ];
+}
 
 function useCountUp(target: number, decimals: number, duration: number, start: boolean) {
   const [value, setValue] = useState(0);
@@ -326,28 +333,28 @@ const STORY = [
     step: "01",
     title: "AI detects an anomaly",
     caption: "Real-time signals reveal a service failure within seconds.",
-    image: "/assets/story-detect.jpg",
+    image: "/assets/story-detect.webp",
     alt: "AI anomaly detection visualization",
   },
   {
     step: "02",
     title: "AI investigates and identifies root cause",
     caption: "Evidence is gathered across logs, metrics, and traces to pinpoint the exact failure point.",
-    image: "/assets/story-investigate.jpg",
+    image: "/assets/story-investigate.webp",
     alt: "AI root cause investigation visualization",
   },
   {
     step: "03",
     title: "AI executes safe remediation",
     caption: "A targeted fix is applied autonomously — no human intervention required.",
-    image: "/assets/story-remediate.jpg",
+    image: "/assets/story-remediate.webp",
     alt: "AI remediation execution visualization",
   },
   {
     step: "04",
     title: "System recovers and verifies health",
     caption: "Post-recovery checks confirm the service is stable and performing as expected.",
-    image: "/assets/story-recover.jpg",
+    image: "/assets/story-recover.webp",
     alt: "System health verification visualization",
   },
 ];
@@ -576,6 +583,8 @@ export default function Home() {
   const incidentSp = Math.max(0, Math.min(1, (incidentSection.progress - 0.15) / 0.35));
   const incidentEased = 1 - Math.pow(1 - incidentSp, 3);
 
+  const stats = buildStats(recent, health);
+
   return (
     <div className="flex min-h-screen flex-col">
       {/* ── header ── */}
@@ -694,7 +703,7 @@ export default function Home() {
         <div ref={statsSection.ref} className="scroll-section scroll-overlap" style={{ height: "120vh" }}>
           <div className="scroll-sticky" style={{ paddingTop: "60px" }}>
             <div className="stats-scroll-grid mx-auto w-full max-w-3xl">
-              {STATS.map((stat, i) => (
+              {stats.map((stat, i) => (
                 <StatCard key={stat.label} stat={stat} progress={statsSection.progress} index={i} />
               ))}
             </div>
