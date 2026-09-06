@@ -28,8 +28,14 @@ export default function RootLayout({
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} theme-dark`}>
       <body>
         <ThemeProvider>
-          <div className="cine-bg" aria-hidden />
-          <div className="cine-grid" aria-hidden />
+          {/* Layered premium AI/SaaS background */}
+          <div className="bg-base" aria-hidden />
+          <div className="bg-grid" aria-hidden />
+          <div className="bg-glow-hero" aria-hidden />
+          <div className="bg-blob bg-blob-1" aria-hidden />
+          <div className="bg-blob bg-blob-2" aria-hidden />
+          <div className="bg-blob bg-blob-3" aria-hidden />
+          <div className="bg-particles" aria-hidden />
           {children}
         </ThemeProvider>
       </body>
