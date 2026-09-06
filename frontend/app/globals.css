@@ -252,6 +252,50 @@ body {
   transition: background-image 0.5s ease;
 }
 
+/* Brighter cine-bg/cine-grid wash so the wash still reads underneath the
+   animated network layer below. Applied only via the .cine-boost class the
+   landing page toggles on document.documentElement while mounted — every
+   other page keeps the base intensity above, since they have no canvas
+   layer sitting on top of it. */
+:root.theme-dark.cine-boost {
+  --cine-radial-1: rgba(21, 56, 84, 0.42);
+  --cine-radial-2: rgba(56, 18, 42, 0.26);
+  --cine-radial-3: rgba(10, 46, 58, 0.32);
+  --grid-line: rgba(96, 165, 250, 0.06);
+}
+
+/* ---- landing-page-only looping animated layer: drifting network nodes
+   with proximity links + sonar pulses, rendered above cine-bg/cine-grid.
+   See CineNetworkBackground.tsx. ---- */
+.bg-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: -8;
+  display: block;
+  width: 100%;
+  height: 100%;
+  filter: blur(0.6px);
+}
+
+.bg-canvas--soft {
+  filter: blur(0.3px);
+}
+
+.bg-frost {
+  position: fixed;
+  inset: 0;
+  z-index: -7;
+  pointer-events: none;
+  background: rgba(255, 255, 255, 0.005);
+  backdrop-filter: blur(1.2px);
+  -webkit-backdrop-filter: blur(1.2px);
+}
+
+.bg-frost--soft {
+  backdrop-filter: blur(0.6px);
+  -webkit-backdrop-filter: blur(0.6px);
+}
+
 /* ============================================================
    PANEL
    ============================================================ */
