@@ -125,6 +125,12 @@ export interface IncidentReport {
   timeline_summary: string[];
 }
 
+/** Where an incident came from — "simulator" (an injected demo/test
+ * scenario) or "url_monitor" (a real, user-registered application
+ * genuinely failing its health checks). See backend/contracts/models.py's
+ * Incident.source docstring. */
+export type IncidentSource = "simulator" | "url_monitor";
+
 /** Shape returned by GET /incidents (list endpoint) */
 export interface IncidentSummary {
   id: string;
@@ -133,6 +139,8 @@ export interface IncidentSummary {
   severity: SeverityLevel | null;
   current_stage: PipelineStage | null;
   created_at: string;
+  source: IncidentSource;
+  target_url: string | null;
 }
 
 /** Full shape returned by GET /incidents/{id} */
@@ -239,6 +247,11 @@ export const SCENARIOS: { id: string; label: string; service: string; descriptio
  * GET /targets, GET /targets/{id}, POST /targets, and
  * POST /targets/{id}/monitoring.
  */
+/** Deterministic classification of the last failed check — see
+ * backend/monitoring/url_monitor.py::check_url_health. null on a healthy
+ * check or a target that has never been checked yet. */
+export type FailureType = "timeout" | "connection_error" | "http_error" | null;
+
 export interface MonitoredTarget {
   id: string;
   name: string;
@@ -250,6 +263,9 @@ export interface MonitoredTarget {
   last_status_code: number | null;
   last_latency_ms: number | null;
   last_error: string | null;
+  last_failure_type: FailureType;
+  last_body_size_bytes: number | null;
+  last_recovered_at: string | null;
   active_incident_id: string | null;
   incident_reported: boolean;
   created_at: string;
