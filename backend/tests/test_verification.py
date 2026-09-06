@@ -253,6 +253,26 @@ class TestUrlMonitorVerification:
         assert "refused" in result.message
 
     @pytest.mark.asyncio
+    async def test_healthy_url_recovered_metrics_include_latency_and_body_size(
+        self, monkeypatch, url_monitor_incident
+    ):
+        """Phase 2: verify_via_url delegates to check_url_health, so a
+        successful re-check's recovered_metrics carry the same real evidence
+        (latency, response size) an incident's own signals would — not just
+        a bare status code."""
+        response = _FakeUrlResponse(200)
+        response.content = b"healthy again"
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeUrlAsyncClient(response))
+
+        verification = VerificationInterface(docker_ctl=None)
+        result = await verification.verify(url_monitor_incident)
+
+        assert result.verified is True
+        assert result.recovered_metrics["status_code"] == 200
+        assert result.recovered_metrics["body_size_bytes"] == len(b"healthy again")
+        assert isinstance(result.recovered_metrics["latency_ms"], float)
+
+    @pytest.mark.asyncio
     async def test_simulator_incident_with_target_url_unset_uses_docker_path(self, monkeypatch):
         # source defaults to "simulator" — even if target_url happened to be
         # set, only source == "url_monitor" takes the URL-verification path.

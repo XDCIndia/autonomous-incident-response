@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from backend.monitoring.ssrf_guard import SSRFValidationError, build_safe_transport
+from backend.monitoring.url_monitor import check_url_health
 
 
 @pytest.mark.asyncio
@@ -56,3 +57,30 @@ async def test_real_redirect_to_public_host_still_works():
         resp = await client.get("https://httpbin.org/redirect-to?url=https://example.com")
     assert resp.status_code == 200
     assert str(resp.url).rstrip("/") == "https://example.com"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 regression: the richer check_url_health() (failure classification,
+# body size) must not have weakened SSRF protection — a blocked target
+# degrades to an ordinary failed-check result (never raises out of
+# check_url_health, never bypasses the guard), same as any other real
+# connection failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_url_health_real_public_url_reports_success_and_body_size():
+    result = await check_url_health("https://example.com")
+    assert result["success"] is True
+    assert result["failure_type"] is None
+    assert result["status_code"] == 200
+    assert result["body_size_bytes"] is not None
+    assert result["body_size_bytes"] > 0
+
+
+@pytest.mark.asyncio
+async def test_check_url_health_real_loopback_is_blocked_not_crashed():
+    result = await check_url_health("http://127.0.0.1:9/", timeout=5.0)
+    assert result["success"] is False
+    assert result["failure_type"] == "connection_error"
+    assert "disallowed address" in result["error"]
