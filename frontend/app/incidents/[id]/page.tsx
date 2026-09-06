@@ -18,8 +18,10 @@ import {
 import {
   PIPELINE_STAGE_ORDER,
   type Incident,
+  type IncidentSource,
   type PipelineStage,
   type SeverityLevel,
+  type TelemetryEvent,
   type TimelineEvent,
 } from "@/lib/types";
 
@@ -50,6 +52,74 @@ function stateTone(state: string): "ok" | "crit" | "warn" | "info" {
 function formatTime(iso: string): string {
   const d = new Date(iso);
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
+function incidentSourceTone(source: IncidentSource): "info" | "neutral" {
+  return source === "url_monitor" ? "info" : "neutral";
+}
+
+function incidentSourceLabel(source: IncidentSource): string {
+  return source === "url_monitor" ? "URL Monitor" : "Simulator";
+}
+
+const FAILURE_TYPE_LABEL: Record<string, string> = {
+  timeout: "Timed out",
+  connection_error: "Connection failed",
+  http_error: "Server error",
+};
+
+const AUTONOMY_LABEL: Record<string, string> = {
+  assist: "Assist — recommendation only, low confidence",
+  semi: "Semi-autonomous — required human approval",
+  autonomous: "Autonomous — auto-executed",
+};
+
+/** Readable one-line summary of a signal's real, observed metadata — never
+ * invents anything the backend didn't actually put in metadata. Falls back
+ * to the raw log_message alone when none of the known structured fields
+ * (Phase 2 enrichment) are present, so simulator-scenario signals (which
+ * don't carry these fields) still render sensibly. */
+function signalDetail(signal: TelemetryEvent): string {
+  const meta = signal.metadata ?? {};
+  const parts: string[] = [];
+  const failureType = meta["failure_type"];
+  if (typeof failureType === "string" && failureType) {
+    parts.push(FAILURE_TYPE_LABEL[failureType] ?? failureType);
+  }
+  const statusCode = meta["status_code"];
+  if (typeof statusCode === "number") parts.push(`HTTP ${statusCode}`);
+  if (typeof signal.value === "number") {
+    parts.push(signal.event_type === "latency" ? `${signal.value}ms` : String(signal.value));
+  }
+  const bodySize = meta["body_size_bytes"];
+  if (typeof bodySize === "number") parts.push(`${bodySize} bytes`);
+  const consecutiveFailures = meta["consecutive_failures"];
+  if (typeof consecutiveFailures === "number" && consecutiveFailures > 0) {
+    parts.push(`${consecutiveFailures} consecutive failure${consecutiveFailures === 1 ? "" : "s"}`);
+  }
+  return parts.join(" · ");
+}
+
+function SignalRow({ signal }: { signal: TelemetryEvent }) {
+  const reveal = useScrollReveal<HTMLDivElement>();
+  const logMessage = typeof signal.metadata?.["log_message"] === "string" ? (signal.metadata["log_message"] as string) : null;
+  const detail = signalDetail(signal);
+  return (
+    <div
+      ref={reveal.ref}
+      style={reveal.style}
+      className={`rounded-md bg-[var(--color-bg-surface)] px-3 py-2 text-[13px] ${reveal.className}`}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <MicroLabel>{signal.event_type}</MicroLabel>
+        {detail && <span className="font-mono text-[11px] text-[var(--color-text-muted)]">{detail}</span>}
+        <span className="ml-auto font-mono text-[10px] text-[var(--color-text-faint)]">
+          {formatTime(signal.timestamp)}
+        </span>
+      </div>
+      {logMessage && <p className="mt-1 text-[var(--color-text-secondary)]">{logMessage}</p>}
+    </div>
+  );
 }
 
 /* ── stage stepper — driven entirely by incident.current_stage + timeline ── */
@@ -314,6 +384,7 @@ export default function IncidentPage() {
           <span className="text-[14px] font-semibold tracking-[0.06em] text-[var(--color-text-primary)]">
             {serviceDisplayName(incident.service_name)}
           </span>
+          <Chip tone={incidentSourceTone(incident.source)}>{incidentSourceLabel(incident.source)}</Chip>
           <Chip tone={stateTone(incident.state)}>{incident.state}</Chip>
           {incident.severity && <Chip tone={severityTone(incident.severity)}>{incident.severity}</Chip>}
           <span className="ml-auto flex items-center gap-1.5">
@@ -371,6 +442,25 @@ export default function IncidentPage() {
             <dl className="grid grid-cols-2 gap-y-3 text-[13px]">
               <dt className="text-[var(--color-text-muted)]">Service</dt>
               <dd className="text-[var(--color-text-primary)]">{serviceDisplayName(incident.service_name)}</dd>
+              <dt className="text-[var(--color-text-muted)]">Source</dt>
+              <dd>
+                <Chip tone={incidentSourceTone(incident.source)}>{incidentSourceLabel(incident.source)}</Chip>
+              </dd>
+              {incident.target_url && (
+                <>
+                  <dt className="text-[var(--color-text-muted)]">Monitored URL</dt>
+                  <dd className="truncate">
+                    <a
+                      href={incident.target_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-[12px] text-[var(--color-accent-cyan)] hover:underline"
+                    >
+                      {incident.target_url}
+                    </a>
+                  </dd>
+                </>
+              )}
               <dt className="text-[var(--color-text-muted)]">State</dt>
               <dd>
                 <Chip tone={stateTone(incident.state)}>{incident.state}</Chip>
@@ -378,7 +468,9 @@ export default function IncidentPage() {
               <dt className="text-[var(--color-text-muted)]">Severity</dt>
               <dd className="text-[var(--color-text-primary)]">{incident.severity ?? "—"}</dd>
               <dt className="text-[var(--color-text-muted)]">Autonomy</dt>
-              <dd className="text-[var(--color-text-primary)]">{incident.autonomy_level ?? "—"}</dd>
+              <dd className="text-[var(--color-text-primary)]">
+                {incident.autonomy_level ? AUTONOMY_LABEL[incident.autonomy_level] : "—"}
+              </dd>
               <dt className="text-[var(--color-text-muted)]">Current Stage</dt>
               <dd className="text-[var(--color-text-primary)]">{incident.current_stage ?? "—"}</dd>
               <dt className="text-[var(--color-text-muted)]">Signals</dt>
@@ -399,6 +491,17 @@ export default function IncidentPage() {
             </div>
           </Panel>
         </div>
+
+        {/* ── evidence / signals — the real telemetry detection was based on ── */}
+        {incident.signals.length > 0 && (
+          <Panel title="Evidence & Signals">
+            <div className="flex flex-col gap-1.5">
+              {incident.signals.map((signal) => (
+                <SignalRow key={signal.id} signal={signal} />
+              ))}
+            </div>
+          </Panel>
+        )}
 
         {/* ── severity & blast radius ── */}
         {incident.severity_result && (
@@ -481,6 +584,15 @@ export default function IncidentPage() {
         {/* ── remediation ── */}
         {incident.remediation_request && (
           <Panel title="Remediation">
+            {incident.source === "url_monitor" && (
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-[rgba(54,215,232,0.3)] bg-[rgba(54,215,232,0.06)] px-3 py-2 text-[12px] text-[var(--color-accent-cyan)]">
+                <MicroLabel>Recommendation only</MicroLabel>
+                <span className="text-[var(--color-text-secondary)]">
+                  — this is an arbitrary external URL with no control-plane integration. System Bachao
+                  recommends an action; a human or an external system must actually perform it.
+                </span>
+              </div>
+            )}
             <p className="text-[13px] text-[var(--color-text-primary)]">
               <strong>{incident.remediation_request.action}</strong> on {incident.remediation_request.target_service}
             </p>
@@ -490,10 +602,13 @@ export default function IncidentPage() {
                 className={`mt-3 rounded-md px-3 py-2 text-[13px] ${
                   incident.remediation_result.success
                     ? "bg-[rgba(0,214,163,0.06)] text-[var(--color-status-healthy)]"
-                    : "bg-[rgba(255,77,103,0.06)] text-[var(--color-accent-red)]"
+                    : incident.source === "url_monitor"
+                      ? "bg-[rgba(245,184,75,0.06)] text-[var(--color-accent-amber)]"
+                      : "bg-[rgba(255,77,103,0.06)] text-[var(--color-accent-red)]"
                 }`}
               >
-                {incident.remediation_result.success ? "✓" : "✕"} {incident.remediation_result.message}
+                {incident.remediation_result.success ? "✓" : incident.source === "url_monitor" ? "→" : "✕"}{" "}
+                {incident.remediation_result.message}
               </div>
             )}
           </Panel>
