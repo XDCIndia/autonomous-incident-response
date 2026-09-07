@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTheme } from "@/lib/theme-context";
 
 // Looping animated background for the landing page only: a drifting
@@ -37,9 +37,9 @@ interface Pulse {
 }
 
 const LAYER_DEFS: LayerDef[] = [
-  { count: 40, speed: 0.14, r: [0.5, 1.1], alpha: 0.28, link: 90 },
-  { count: 45, speed: 0.3, r: [1.0, 1.9], alpha: 0.55, link: 130 },
-  { count: 22, speed: 0.52, r: [1.6, 2.8], alpha: 0.9, link: 170 },
+  { count: 25, speed: 0.14, r: [0.5, 1.1], alpha: 0.28, link: 90 },
+  { count: 30, speed: 0.3, r: [1.0, 1.9], alpha: 0.55, link: 130 },
+  { count: 15, speed: 0.52, r: [1.6, 2.8], alpha: 0.9, link: 170 },
 ];
 
 const BG_RGB: [number, number, number] = [3, 6, 9];
@@ -54,6 +54,7 @@ interface CineNetworkBackgroundProps {
 export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { theme } = useTheme();
+  const [isReady, setIsReady] = useState(false);
 
   // Scoped intensity boost: cine-bg/cine-grid live in the root layout and
   // are shared by every page, so the brighter wash this animated layer
@@ -70,16 +71,7 @@ export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroun
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Reference design is dark-only — the canvas paints its own opaque dark
-    // fill every frame, which reads as a broken seam over the light theme's
-    // white surfaces. Rather than invent a light-mode palette nobody asked
-    // for, just clear the canvas and skip the animation while light theme
-    // is active; it resumes cleanly if the user switches back to dark.
-    if (theme !== "dark") {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-
+    // Start animation immediately — theme check happens in parallel
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     let w = 0;
@@ -201,6 +193,11 @@ export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroun
     makeLayers();
     paintBase();
     draw();
+    
+    // Trigger fade-in after first frame is painted
+    const fadeTimer = setTimeout(() => {
+      setIsReady(true);
+    }, 100);
 
     const onResize = () => {
       clearTimeout(resizeTimer);
@@ -210,6 +207,8 @@ export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroun
         makeLayers();
         paintBase();
         draw();
+        // Restart animation after resize
+        if (!reduceMotion) rafId = requestAnimationFrame(draw);
       }, 200);
     };
     window.addEventListener("resize", onResize);
@@ -217,6 +216,7 @@ export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroun
     return () => {
       window.removeEventListener("resize", onResize);
       clearTimeout(resizeTimer);
+      clearTimeout(fadeTimer);
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, [theme]);
@@ -225,7 +225,11 @@ export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroun
 
   return (
     <>
-      <canvas ref={canvasRef} className={soft ? "bg-canvas bg-canvas--soft" : "bg-canvas"} aria-hidden />
+      <canvas 
+        ref={canvasRef} 
+        className={`${soft ? "bg-canvas bg-canvas--soft" : "bg-canvas"} ${isReady ? "bg-canvas--ready" : ""}`} 
+        aria-hidden 
+      />
       <div className={soft ? "bg-frost bg-frost--soft" : "bg-frost"} aria-hidden />
     </>
   );
