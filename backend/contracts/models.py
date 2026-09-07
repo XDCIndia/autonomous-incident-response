@@ -285,5 +285,11 @@ class MonitoredTarget(BaseModel):
     # incident on almost every monitor tick for the duration of one real
     # outage. Only a genuine recovery clears this flag.
     incident_reported: bool = False
+
+    # --- Phase 4: Webhook remediation ---
+    # When set, IRAS calls this URL with a signed payload when remediation
+    # is needed. The remote system performs the actual fix and reports back.
+    remediation_webhook_url: Optional[str] = None
+    remediation_webhook_secret: Optional[str] = None  # HMAC secret for signing
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
