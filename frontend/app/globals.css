@@ -788,9 +788,9 @@ body {
      cascade would win outright rather than merge, breaking one or the
      other. Using `top` here keeps the two fully independent. */
   position: relative;
-  top: 20px;
+  top: 16px;
   opacity: 0;
-  transition: opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1), top 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), top 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .scroll-reveal.is-visible {
   top: 0;
