@@ -1,0 +1,8 @@
+services:
+  backend:
+    ports: !override
+      - "8002:8000"
+  frontend:
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8002
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8002

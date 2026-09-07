@@ -62,10 +62,14 @@ export function TerminalMock() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isTyping, setIsTyping] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
+  const [currentTimestamp, setCurrentTimestamp] = useState("");
+  const [completeTimestamp, setCompleteTimestamp] = useState("");
+  const [isMounted, setIsMounted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const prefersReducedMotion = useRef(false);
 
   useEffect(() => {
+    setIsMounted(true);
     prefersReducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }, []);
 
@@ -81,11 +85,14 @@ export function TerminalMock() {
     if (prefersReducedMotion.current) {
       // Show all lines instantly
       const now = new Date();
+      const ts = now.toLocaleTimeString("en-US", { hour12: false });
+      setCurrentTimestamp(ts);
+      setCompleteTimestamp(ts);
       setLines(
         LOG_SCRIPT.map((line, i) => ({
           ...line,
           id: i,
-          timestamp: now.toLocaleTimeString("en-US", { hour12: false }),
+          timestamp: ts,
         }))
       );
       setIsComplete(true);
@@ -120,10 +127,11 @@ export function TerminalMock() {
 
     // Line complete
     const now = new Date();
+    const ts = now.toLocaleTimeString("en-US", { hour12: false });
     const newLine: LogLine = {
       ...current,
       id: currentIndex,
-      timestamp: now.toLocaleTimeString("en-US", { hour12: false }),
+      timestamp: ts,
     };
 
     const nextTimer = setTimeout(() => {
@@ -131,6 +139,7 @@ export function TerminalMock() {
       setCurrentText("");
       setCurrentIndex((i) => i + 1);
       setIsTyping(false);
+      setCurrentTimestamp(ts);
     }, 100);
     return () => clearTimeout(nextTimer);
   }, [currentIndex, currentText, isTyping]);
@@ -164,10 +173,10 @@ export function TerminalMock() {
           </div>
         ))}
 
-        {currentIndex < LOG_SCRIPT.length && (
+        {isMounted && currentIndex < LOG_SCRIPT.length && (
           <div className="terminal-line">
             <span className="terminal-timestamp">
-              {new Date().toLocaleTimeString("en-US", { hour12: false })}
+              {currentTimestamp}
             </span>
             <span className={`terminal-stage ${STAGE_COLORS[LOG_SCRIPT[currentIndex].stage]}`}>
               [{STAGE_LABELS[LOG_SCRIPT[currentIndex].stage]}]
@@ -179,10 +188,10 @@ export function TerminalMock() {
           </div>
         )}
 
-        {isComplete && (
+        {isMounted && isComplete && (
           <div className="terminal-line terminal-line-complete">
             <span className="terminal-timestamp">
-              {new Date().toLocaleTimeString("en-US", { hour12: false })}
+              {completeTimestamp}
             </span>
             <span className="terminal-stage text-[var(--color-status-healthy)]">[RESOLVED]</span>
             <span className="terminal-text text-[var(--color-status-healthy)]">
