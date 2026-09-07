@@ -1011,6 +1011,46 @@ async def get_timeline(incident_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Status page (public, no auth) + Notification config (auth required)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/status")
+async def get_status_page():
+    """Public status page data — no authentication required.
+
+    Returns a read-only summary of incident status for the last 24 hours,
+    suitable for a public-facing status page. Only includes data that is
+    safe to expose externally (no internal details, no user data).
+    """
+    from backend.platform.notifications import get_status_page_data
+    storage = get_storage()
+    return await get_status_page_data(storage)
+
+
+@app.get("/targets/{target_id}/check-history", dependencies=[Depends(require_auth)])
+async def get_target_check_history(target_id: str, limit: int = Query(50, ge=1, le=100)):
+    """Get recent check history for a monitored target.
+
+    Returns the rolling history of health check results, including latency,
+    status code, success/failure, and which checks were run. This is real
+    data — not fabricated or simulated.
+    """
+    storage = get_storage()
+    target = await target_store.get_target(storage, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    history = target.check_history[-limit:] if target.check_history else []
+    return {
+        "target_id": target_id,
+        "history": history,
+        "uptime_percentage": target.uptime_percentage,
+        "total_checks": target.total_checks,
+        "total_failures": target.total_failures,
+    }
+
+
+# ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
 
