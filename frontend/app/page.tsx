@@ -109,6 +109,7 @@ function StatCard({
   const count = useCountUp(stat.value, stat.decimals ?? 0, 1400, start);
 
   // Each card staggers based on index — they arrive sequentially
+  // Shifted earlier so animation starts when element enters viewport, not after full scroll
   const cardStart = 0.1 + index * 0.08;
   const cardEnd = cardStart + 0.15;
   const sp = Math.max(0, Math.min(1, (progress - cardStart) / (cardEnd - cardStart)));
@@ -481,9 +482,13 @@ function useSectionProgress<T extends HTMLElement>() {
     const el = ref.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const total = rect.height;
-    const scrolled = Math.max(0, -rect.top);
-    const p = Math.max(0, Math.min(1, scrolled / total));
+    const viewportH = window.innerHeight;
+    // For sticky sections: progress based on how far the section has scrolled
+    // Start: section top enters viewport bottom (rect.top = viewportH)
+    // End: section bottom leaves viewport top (rect.bottom = 0)
+    const total = rect.height + viewportH;
+    const current = viewportH - rect.top;
+    const p = Math.max(0, Math.min(1, current / total));
     if (Math.abs(p - lastP.current) > 0.002) {
       lastP.current = p;
       progressRef.current = p;
@@ -690,7 +695,7 @@ export default function Home() {
         </div>
 
         {/* ── TERMINAL: slides up + scales into view as you scroll ── */}
-        <div ref={terminalSection.ref} className="scroll-section scroll-overlap" style={{ height: "140vh" }}>
+        <div ref={terminalSection.ref} className="scroll-section scroll-overlap" style={{ height: "120vh" }}>
           <div className="scroll-sticky" style={{ paddingTop: "60px" }}>
             <div
               className="terminal-scroll-enter terminal-glow w-full"
@@ -713,7 +718,7 @@ export default function Home() {
         </div>
 
         {/* ── SYSTEM STATUS: service cards stagger in ── */}
-        <div ref={servicesSection.ref} className="scroll-section scroll-overlap" style={{ height: "140vh" }}>
+        <div ref={servicesSection.ref} className="scroll-section scroll-overlap" style={{ height: "120vh" }}>
           <div className="scroll-sticky" style={{ paddingTop: "60px" }}>
             <SectionLabel>System Status</SectionLabel>
             <div className="service-grid-scroll mx-auto mt-8 w-full max-w-3xl">
@@ -731,7 +736,7 @@ export default function Home() {
         </div>
 
         {/* ── AI RESPONSE FLOW: scroll-linked pipeline progress ── */}
-        <div ref={flowSection.ref} className="scroll-section scroll-overlap" style={{ height: "160vh" }}>
+        <div ref={flowSection.ref} className="scroll-section scroll-overlap" style={{ height: "120vh" }}>
           <div className="scroll-sticky" style={{ paddingTop: "60px" }}>
             <SectionLabel>AI Response Flow</SectionLabel>
             <div className="mt-8 w-full">
@@ -741,7 +746,7 @@ export default function Home() {
         </div>
 
         {/* ── VISUAL STORY: AI response journey ── */}
-        <div ref={storySection.ref} className="scroll-section scroll-overlap" style={{ height: "160vh" }}>
+        <div ref={storySection.ref} className="scroll-section scroll-overlap" style={{ height: "120vh" }}>
           <div className="scroll-sticky" style={{ paddingTop: "60px" }}>
             <SectionLabel>How It Works</SectionLabel>
             <div className="story-grid mx-auto mt-8 w-full max-w-4xl">
