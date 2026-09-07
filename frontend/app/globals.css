@@ -231,7 +231,7 @@ body {
   z-index: -10;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 1.2s ease-out;
+  transition: opacity 2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
 .bg-canvas--ready {

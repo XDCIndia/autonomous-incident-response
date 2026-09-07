@@ -197,7 +197,7 @@ export function CineNetworkBackground({ blur = "default" }: CineNetworkBackgroun
     // Trigger fade-in after first frame is painted
     const fadeTimer = setTimeout(() => {
       setIsReady(true);
-    }, 50);
+    }, 100);
 
     const onResize = () => {
       clearTimeout(resizeTimer);
