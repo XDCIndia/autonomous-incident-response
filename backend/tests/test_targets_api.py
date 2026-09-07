@@ -238,8 +238,15 @@ class TestTargetsRequireApiKeyWhenConfigured:
             config_module._settings = None
 
     @pytest.mark.asyncio
-    async def test_get_targets_stays_open_without_key(self, monkeypatch):
-        # GET is read-only — same posture as GET /incidents, not gated.
+    async def test_get_targets_requires_key_once_any_auth_is_configured(self, monkeypatch):
+        # Superseded by Phase 5 (login): once ANY auth mechanism is
+        # configured (API_KEY here, or AUTH_PASSWORD), reads are gated the
+        # same as writes — see require_auth in backend/api/app.py. Leaving
+        # reads open whenever API_KEY was set was only ever an artifact of
+        # login not existing yet, not a deliberate permanent posture: a
+        # dashboard whose data reads are unauthenticated isn't actually
+        # protected. GET stays open only when NEITHER is configured (the
+        # default, tested elsewhere in this file).
         monkeypatch.setenv("API_KEY", "sekret")
         import backend.platform.config as config_module
 
@@ -248,6 +255,9 @@ class TestTargetsRequireApiKeyWhenConfigured:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 resp = await client.get("/targets")
+                assert resp.status_code == 401
+
+                resp = await client.get("/targets", headers={"X-API-Key": "sekret"})
                 assert resp.status_code == 200
         finally:
             monkeypatch.setenv("API_KEY", "")

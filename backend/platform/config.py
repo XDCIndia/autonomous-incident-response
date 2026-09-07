@@ -86,6 +86,19 @@ class Settings(BaseSettings):
     target_creation_rate_window_seconds: float = 60.0
     max_monitored_targets: int = 200
 
+    # Dashboard login (Phase 5). A single shared password gating the UI —
+    # not a per-user account system (that's a separate, later phase). Empty
+    # (default) disables login entirely: every page and endpoint behaves
+    # exactly as it did before this feature existed, so existing local dev
+    # and every existing test is unaffected. Set AUTH_PASSWORD to require a
+    # session (established via POST /auth/login) on every endpoint that
+    # doesn't already accept a valid X-API-Key — session and API-key auth
+    # are independent and either one satisfies the same gate, so existing
+    # API_KEY-based programmatic/API clients keep working without logging in.
+    auth_password: str = ""
+    session_ttl_minutes: int = 480
+    session_cookie_name: str = "sb_session"
+
     # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
     # and isn't backend config — reject only unknown *backend* keys, not those.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
