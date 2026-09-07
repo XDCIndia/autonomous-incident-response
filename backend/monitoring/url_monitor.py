@@ -21,6 +21,7 @@ import httpx
 
 from backend.contracts import Incident, IncidentState, MonitoredTarget, TelemetryEvent
 from backend.monitoring import targets as target_store
+from backend.monitoring.ssrf_guard import build_safe_transport
 
 if TYPE_CHECKING:
     from backend.orchestrator.pipeline import IncidentOrchestrator
@@ -46,7 +47,9 @@ async def check_url_health(url: str, timeout: float = 5.0) -> dict[str, Any]:
     """
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True, transport=build_safe_transport()
+        ) as client:
             resp = await client.get(url)
         latency_ms = (time.monotonic() - start) * 1000
         return {
