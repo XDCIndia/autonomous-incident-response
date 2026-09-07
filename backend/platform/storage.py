@@ -143,6 +143,17 @@ class Storage:
             )
             """
         )
+        # Approval persistence (Phase 5) — survives backend restarts
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_approvals (
+                incident_id TEXT PRIMARY KEY,
+                decision TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                decided_at TEXT
+            )
+            """
+        )
         await self._conn.commit()
         logger.info("Storage: initialized SQLite at %s", self._db_path)
 
@@ -363,6 +374,51 @@ class Storage:
                 return False
             expected_prev = row["hash"]
         return True
+
+    # -------------------------------------------------------------------
+    # Approval persistence (Phase 5)
+    # -------------------------------------------------------------------
+
+    async def save_pending_approval(self, incident_id: str) -> None:
+        """Record a pending approval for an incident."""
+        conn = self._require_conn()
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        await conn.execute(
+            "INSERT OR REPLACE INTO pending_approvals (incident_id, decision, created_at) VALUES (?, 'pending', ?)",
+            (incident_id, now),
+        )
+        await conn.commit()
+
+    async def get_approval_decision(self, incident_id: str) -> Optional[str]:
+        """Get the approval decision for an incident. Returns 'pending', 'approved', 'rejected', or None."""
+        conn = self._require_conn()
+        async with conn.execute(
+            "SELECT decision FROM pending_approvals WHERE incident_id = ?",
+            (incident_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row["decision"] if row else None
+
+    async def set_approval_decision(self, incident_id: str, decision: str) -> None:
+        """Set the approval decision ('approved' or 'rejected')."""
+        conn = self._require_conn()
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        await conn.execute(
+            "UPDATE pending_approvals SET decision = ?, decided_at = ? WHERE incident_id = ?",
+            (decision, now, incident_id),
+        )
+        await conn.commit()
+
+    async def get_pending_approvals(self) -> list[dict[str, Any]]:
+        """Get all pending approvals."""
+        conn = self._require_conn()
+        async with conn.execute(
+            "SELECT incident_id, decision, created_at FROM pending_approvals WHERE decision = 'pending'"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [{"incident_id": row["incident_id"], "decision": row["decision"], "created_at": row["created_at"]} for row in rows]
 
     async def close(self):
         """Close the database connection."""

@@ -28,21 +28,81 @@ export class ApiError extends Error {
   }
 }
 
+// A same-origin (this app's own :3000/whatever origin), non-httpOnly marker
+// cookie — NOT the actual session credential. The real session lives in an
+// httpOnly cookie scoped to the backend's own origin (set by POST
+// /auth/login, sent automatically on every `credentials: "include"` fetch
+// below); this marker only exists so frontend/middleware.ts — which runs
+// server-side for THIS app's origin and therefore never sees the backend's
+// cross-origin cookie at all — has something same-origin to check before
+// rendering a protected page. It carries no secret and proves nothing by
+// itself: every real data fetch below still requires the backend to accept
+// the actual session cookie, which is the real authorization boundary.
+const UI_SESSION_MARKER = "sb_ui_session";
+
+function setUiSessionMarker(present: boolean) {
+  if (typeof document === "undefined") return;
+  document.cookie = present
+    ? `${UI_SESSION_MARKER}=1; path=/; samesite=lax`
+    : `${UI_SESSION_MARKER}=; path=/; samesite=lax; max-age=0`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
   if (API_KEY) headers["X-API-Key"] = API_KEY;
 
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${path}`, { ...init, headers });
+    res = await fetch(`${API_URL}${path}`, { ...init, headers, credentials: "include" });
   } catch {
     throw new ApiError("Failed to connect to backend", 0);
+  }
+  if (res.status === 401 && path !== "/auth/login") {
+    // Session expired, was never established, or got invalidated elsewhere
+    // (e.g. logged out in another tab). Clear the UI-side marker and send
+    // the user back to log in again — this is the client reacting to the
+    // backend's real authorization decision, not making one of its own.
+    setUiSessionMarker(false);
+    if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+    }
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new ApiError(body.detail || `Request failed (${res.status})`, res.status);
   }
   return res.json() as Promise<T>;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard login (Phase 5) — a single shared password, not per-user accounts.
+// ---------------------------------------------------------------------------
+
+export interface AuthSession {
+  authenticated: boolean;
+  auth_required: boolean;
+}
+
+export function getAuthSession(): Promise<AuthSession> {
+  return request<AuthSession>("/auth/session");
+}
+
+export async function login(password: string): Promise<AuthSession> {
+  const session = await request<AuthSession>("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  setUiSessionMarker(true);
+  return session;
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await request<AuthSession>("/auth/logout", { method: "POST" });
+  } finally {
+    setUiSessionMarker(false);
+  }
 }
 
 export function listIncidents(limit = 50): Promise<IncidentSummary[]> {

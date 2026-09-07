@@ -69,6 +69,36 @@ class Settings(BaseSettings):
     url_monitor_interval_seconds: float = 15.0
     url_monitor_failure_threshold: int = 3
 
+    # Abuse protection for POST /targets (issue: rate limiting). Without
+    # authentication configured (API_KEY empty — the local-dev default),
+    # this is the only endpoint that lets any caller make the backend
+    # repeatedly send outbound HTTP requests to arbitrary URLs on a
+    # recurring schedule. Both limits are appropriate ONLY for a single
+    # backend process — see docs/REAL_MONITORING_PLAN.md Phase 5, which
+    # revisits this once there is more than one replica.
+    #   target_creation_rate_limit / _window_seconds: sliding-window cap on
+    #     how many targets one client (by IP) may create per window.
+    #   max_monitored_targets: hard ceiling on total targets, independent of
+    #     creation rate over time — this is what actually bounds the
+    #     background monitor loop's total outbound request volume per tick,
+    #     since check frequency itself is a global setting, not per-caller.
+    target_creation_rate_limit: int = 10
+    target_creation_rate_window_seconds: float = 60.0
+    max_monitored_targets: int = 200
+
+    # Dashboard login (Phase 5). A single shared password gating the UI —
+    # not a per-user account system (that's a separate, later phase). Empty
+    # (default) disables login entirely: every page and endpoint behaves
+    # exactly as it did before this feature existed, so existing local dev
+    # and every existing test is unaffected. Set AUTH_PASSWORD to require a
+    # session (established via POST /auth/login) on every endpoint that
+    # doesn't already accept a valid X-API-Key — session and API-key auth
+    # are independent and either one satisfies the same gate, so existing
+    # API_KEY-based programmatic/API clients keep working without logging in.
+    auth_password: str = ""
+    session_ttl_minutes: int = 480
+    session_cookie_name: str = "sb_session"
+
     # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
     # and isn't backend config — reject only unknown *backend* keys, not those.
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
