@@ -22,7 +22,7 @@ export function useScrollReveal<T extends HTMLElement>(delay = 0) {
           observer.unobserve(el);
         }
       },
-      { threshold: 0.15, rootMargin: "0px 0px 0px 0px" }
+      { threshold: 0, rootMargin: "0px" }
     );
     observer.observe(el);
     return () => observer.disconnect();
