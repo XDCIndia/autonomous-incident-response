@@ -268,6 +268,7 @@ class MonitoredTarget(BaseModel):
     name: str
     url: str
     monitoring_enabled: bool = True
+    owner_id: Optional[str] = None  # user who created this target
     health_status: str = "unknown"  # "unknown" | "healthy" | "unhealthy"
     consecutive_failures: int = 0
     last_checked_at: Optional[datetime] = None
