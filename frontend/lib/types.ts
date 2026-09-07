@@ -252,8 +252,34 @@ export interface MonitoredTarget {
   last_error: string | null;
   active_incident_id: string | null;
   incident_reported: boolean;
+  // Phase 2: Configurable check types
+  http_method: string;
+  http_headers: Record<string, string>;
+  http_body: string | null;
+  expected_body_pattern: string | null;
+  json_path: string | null;
+  json_path_expected: string | null;
+  check_tcp_port: number | null;
+  check_dns: boolean;
+  check_tls_expiry_days: number | null;
+  // Phase 2: Historical data
+  check_history: CheckResult[];
+  avg_latency_ms: number | null;
+  uptime_percentage: number | null;
+  total_checks: number;
+  total_failures: number;
   created_at: string;
   updated_at: string;
+}
+
+/** A single check result from the monitoring history */
+export interface CheckResult {
+  timestamp: string;
+  success: boolean;
+  latency_ms: number | null;
+  status_code: number | null;
+  failure_type: string | null;
+  checks_run: string[];
 }
 
 // Real services from docker-compose.yml — used for the health grid.
