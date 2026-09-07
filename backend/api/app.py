@@ -1050,11 +1050,10 @@ async def websocket_incident(websocket: WebSocket, incident_id: str):
 
     Connect to receive real-time updates during incident processing.
     """
+    await websocket.accept()
     if not _websocket_authorized(websocket):
         await websocket.close(code=4401)
         return
-
-    await websocket.accept()
 
     event_bus = get_event_bus()
     queue = event_bus.subscribe(incident_id)
