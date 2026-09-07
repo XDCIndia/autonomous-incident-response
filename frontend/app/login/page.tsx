@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -9,6 +10,14 @@ import { CineNetworkBackground } from "@/components/CineNetworkBackground";
 import { ApiError, getAuthSession, login } from "@/lib/api";
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="grid min-h-screen place-items-center"><div className="h-8 w-8 rounded-full border-2 border-[var(--color-border-default)] border-t-[var(--color-accent-cyan)] animate-spin" /></div>}>
+      <LoginPageInner />
+    </Suspense>
+  );
+}
+
+function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const next = searchParams.get("next") || "/dashboard";
