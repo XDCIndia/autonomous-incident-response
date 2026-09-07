@@ -201,6 +201,11 @@ class _FakeUrlAsyncClient:
             raise self._raises
         return self._response
 
+    async def request(self, method, *args, **kwargs):
+        if self._raises:
+            raise self._raises
+        return self._response
+
 
 class TestUrlMonitorVerification:
     """url_monitor-sourced incidents verify against the real target URL

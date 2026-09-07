@@ -50,6 +50,11 @@ class _FakeAsyncClient:
             raise self._raises
         return self._response
 
+    async def request(self, method, *args, **kwargs):
+        if self._raises:
+            raise self._raises
+        return self._response
+
 
 class FakeOrchestrator:
     """Records every incident it was asked to run. Never resolves them on

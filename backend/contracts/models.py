@@ -293,5 +293,35 @@ class MonitoredTarget(BaseModel):
     # incident on almost every monitor tick for the duration of one real
     # outage. Only a genuine recovery clears this flag.
     incident_reported: bool = False
+
+    # --- Phase 2: Configurable check types ---
+    # HTTP check configuration (applies to URL targets)
+    http_method: str = "GET"  # HTTP method for the check request
+    http_headers: dict[str, str] = Field(default_factory=dict)  # Custom headers
+    http_body: Optional[str] = None  # Request body (for POST/PUT)
+    # Keyword/regex body assertion — check fails if response body does NOT
+    # match. None means no body assertion.
+    expected_body_pattern: Optional[str] = None  # regex pattern
+    # JSON path assertion — check fails if the JSON response at this path
+    # does not equal the expected value. None means no JSON assertion.
+    json_path: Optional[str] = None  # e.g. "$.status"
+    json_path_expected: Optional[str] = None  # expected value at path
+
+    # TCP port check — when set, also verifies TCP connectivity
+    check_tcp_port: Optional[int] = None  # e.g. 443 for HTTPS
+    # DNS resolution check — when set, verifies the hostname resolves
+    check_dns: bool = False
+    # TLS certificate check — when set, verifies TLS cert expiry
+    check_tls_expiry_days: Optional[int] = None  # fail if cert expires within N days
+
+    # --- Phase 2: Historical data ---
+    # Recent check results (last N checks) for trend analysis
+    check_history: list[dict[str, Any]] = Field(default_factory=list)
+    # Rolling averages
+    avg_latency_ms: Optional[float] = None
+    uptime_percentage: Optional[float] = None  # last 100 checks
+    total_checks: int = 0
+    total_failures: int = 0
+
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
