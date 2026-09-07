@@ -138,7 +138,8 @@ See `.env.example` for the full list. Key settings:
 |---|---|---|
 | `REAL_ENV` | `auto` | `auto` / `on` / `off` — whether `/incidents/trigger` drives the real Docker/Toxiproxy stack |
 | `IRAS_SERVICE_DNS` | `false` | `true` when the backend runs inside the compose network — verification uses `http://iras-<service>:5000` instead of `http://localhost:<host-port>` |
-| `API_KEY` | *(empty)* | Optional key required on mutating endpoints via the `X-API-Key` header |
+| `APP_ENV` | `development` | `development` keeps `API_KEY` optional for local convenience; any other value (`staging`, `production`, ...) makes `API_KEY` **required** — the backend refuses to start without it |
+| `API_KEY` | *(empty)* | Key required on mutating endpoints via the `X-API-Key` header. Optional only when `APP_ENV=development`; required everywhere else |
 | `CORS_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Browser origins allowed to call the API (never `*`) |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | *(empty)* | LLM provider keys; when unset the pipeline uses deterministic mock agents |
 

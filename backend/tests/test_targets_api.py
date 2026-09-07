@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import backend.api.app as app_module
 import backend.orchestrator as orchestrator_module
 import backend.platform.storage as storage_module
 from backend.api.app import app
@@ -20,6 +21,11 @@ async def reset_storage(monkeypatch):
     import backend.platform.config as config_module
 
     config_module._settings = None
+    # Fresh rate-limit bucket per test — this global otherwise persists
+    # across every test in this file (all sharing one ASGITransport client
+    # key), which would make later tests fail depending on how many POSTs
+    # earlier tests happened to make.
+    app_module._target_creation_limiter = None
 
     storage = Storage(db_path=":memory:")
     await storage.init_db()
@@ -29,6 +35,7 @@ async def reset_storage(monkeypatch):
     storage_module._storage = None
     orchestrator_module._orchestrator = None
     config_module._settings = None
+    app_module._target_creation_limiter = None
 
 
 class TestCreateAndListTargets:
@@ -123,6 +130,95 @@ class TestDeleteAndToggleTarget:
             assert resp.json()["monitoring_enabled"] is True
 
 
+class TestTargetCreationRateLimiting:
+    @pytest.mark.asyncio
+    async def test_exceeding_rate_limit_returns_429(self, monkeypatch):
+        monkeypatch.setenv("TARGET_CREATION_RATE_LIMIT", "2")
+        monkeypatch.setenv("TARGET_CREATION_RATE_WINDOW_SECONDS", "60")
+        import backend.platform.config as config_module
+
+        config_module._settings = None
+        app_module._target_creation_limiter = None
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r1 = await client.post("/targets", json={"name": "One", "url": "http://example.com"})
+            r2 = await client.post("/targets", json={"name": "Two", "url": "http://example.com"})
+            r3 = await client.post("/targets", json={"name": "Three", "url": "http://example.com"})
+
+            assert r1.status_code == 200
+            assert r2.status_code == 200
+            assert r3.status_code == 429
+            assert "Too many" in r3.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_does_not_affect_reads(self, monkeypatch):
+        """Only creation is capped — GET /targets has no such dependency."""
+        monkeypatch.setenv("TARGET_CREATION_RATE_LIMIT", "1")
+        import backend.platform.config as config_module
+
+        config_module._settings = None
+        app_module._target_creation_limiter = None
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post("/targets", json={"name": "One", "url": "http://example.com"})
+            blocked = await client.post("/targets", json={"name": "Two", "url": "http://example.com"})
+            assert blocked.status_code == 429
+
+            # Reads are unaffected by the creation-rate limiter being tripped.
+            listed = await client.get("/targets")
+            assert listed.status_code == 200
+
+
+class TestMaxMonitoredTargetsCap:
+    @pytest.mark.asyncio
+    async def test_creation_blocked_once_cap_reached(self, monkeypatch):
+        monkeypatch.setenv("MAX_MONITORED_TARGETS", "2")
+        import backend.platform.config as config_module
+
+        config_module._settings = None
+        app_module._target_creation_limiter = None
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r1 = await client.post("/targets", json={"name": "One", "url": "http://example.com"})
+            r2 = await client.post("/targets", json={"name": "Two", "url": "http://example.com"})
+            r3 = await client.post("/targets", json={"name": "Three", "url": "http://example.com"})
+
+            assert r1.status_code == 200
+            assert r2.status_code == 200
+            assert r3.status_code == 429
+            assert "limit reached" in r3.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_deleting_a_target_frees_a_slot(self, monkeypatch):
+        monkeypatch.setenv("MAX_MONITORED_TARGETS", "1")
+        import backend.platform.config as config_module
+
+        config_module._settings = None
+        app_module._target_creation_limiter = None
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            created = await client.post(
+                "/targets", json={"name": "One", "url": "http://example.com"}
+            )
+            assert created.status_code == 200
+
+            blocked = await client.post(
+                "/targets", json={"name": "Two", "url": "http://example.com"}
+            )
+            assert blocked.status_code == 429
+
+            await client.delete(f"/targets/{created.json()['id']}")
+
+            after_delete = await client.post(
+                "/targets", json={"name": "Two", "url": "http://example.com"}
+            )
+            assert after_delete.status_code == 200
+
+
 class TestTargetsRequireApiKeyWhenConfigured:
     @pytest.mark.asyncio
     async def test_create_rejected_without_key_when_configured(self, monkeypatch):
@@ -142,8 +238,15 @@ class TestTargetsRequireApiKeyWhenConfigured:
             config_module._settings = None
 
     @pytest.mark.asyncio
-    async def test_get_targets_stays_open_without_key(self, monkeypatch):
-        # GET is read-only — same posture as GET /incidents, not gated.
+    async def test_get_targets_requires_key_once_any_auth_is_configured(self, monkeypatch):
+        # Superseded by Phase 5 (login): once ANY auth mechanism is
+        # configured (API_KEY here, or AUTH_PASSWORD), reads are gated the
+        # same as writes — see require_auth in backend/api/app.py. Leaving
+        # reads open whenever API_KEY was set was only ever an artifact of
+        # login not existing yet, not a deliberate permanent posture: a
+        # dashboard whose data reads are unauthenticated isn't actually
+        # protected. GET stays open only when NEITHER is configured (the
+        # default, tested elsewhere in this file).
         monkeypatch.setenv("API_KEY", "sekret")
         import backend.platform.config as config_module
 
@@ -152,6 +255,9 @@ class TestTargetsRequireApiKeyWhenConfigured:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 resp = await client.get("/targets")
+                assert resp.status_code == 401
+
+                resp = await client.get("/targets", headers={"X-API-Key": "sekret"})
                 assert resp.status_code == 200
         finally:
             monkeypatch.setenv("API_KEY", "")
