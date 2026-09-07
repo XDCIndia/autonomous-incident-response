@@ -28,6 +28,7 @@ from backend.orchestrator import IncidentOrchestrator, get_orchestrator, configu
 from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
 from backend.platform.knowledge_base import search_similar
+from backend.platform.rate_limiter import SlidingWindowRateLimiter
 from backend.platform.storage import get_storage
 from backend.simulator.docker_controller import DockerController
 from backend.simulator.toxiproxy_client import ToxiproxyClient
@@ -51,6 +52,23 @@ _real_env_configured: bool = False
 _real_env_lock: asyncio.Lock = asyncio.Lock()
 # Background URL-monitoring loop (issue #36) — started in lifespan(), cancelled on shutdown.
 _target_monitor_task: Optional[asyncio.Task] = None
+# Rate limiter for POST /targets (abuse protection). Lazily built from
+# settings on first use, not at import time, so tests that override
+# target_creation_rate_limit/_window_seconds via env vars (with the usual
+# config_module._settings = None reset) take effect; reset alongside that
+# same pattern (see backend/tests/test_rate_limiting.py).
+_target_creation_limiter: Optional[SlidingWindowRateLimiter] = None
+
+
+def _get_target_creation_limiter() -> SlidingWindowRateLimiter:
+    global _target_creation_limiter
+    if _target_creation_limiter is None:
+        settings = get_settings()
+        _target_creation_limiter = SlidingWindowRateLimiter(
+            max_requests=settings.target_creation_rate_limit,
+            window_seconds=settings.target_creation_rate_window_seconds,
+        )
+    return _target_creation_limiter
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +334,32 @@ def require_api_key(request: Request) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Abuse protection for POST /targets (rate limiting)
+# ---------------------------------------------------------------------------
+#
+# Without API_KEY configured (the local-dev default), POST /targets is the
+# only endpoint that lets any caller make this backend repeatedly send real
+# outbound HTTP requests to a URL of their choosing on a recurring schedule
+# — an open-proxy-shaped abuse surface distinct from SSRF (a validated
+# public URL is still a vector for using this backend as a request
+# amplifier / anonymizing relay against a third party). Keyed by client IP:
+# a real caveat behind a reverse proxy that doesn't forward the true client
+# address is that all callers share one bucket — acceptable for a
+# single-process local/internal deployment, revisited if this ever sits
+# behind a trusted proxy that sets X-Forwarded-For.
+
+
+def rate_limit_target_creation(request: Request) -> None:
+    limiter = _get_target_creation_limiter()
+    key = request.client.host if request.client else "unknown"
+    if not limiter.allow(key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many target-creation requests — slow down and try again shortly",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Request/Response models
 # ---------------------------------------------------------------------------
 
@@ -384,15 +428,36 @@ async def services_health(service: str = "payment-service"):
 # ---------------------------------------------------------------------------
 
 
-@app.post("/targets", dependencies=[Depends(require_api_key)])
+@app.post(
+    "/targets",
+    dependencies=[Depends(require_api_key), Depends(rate_limit_target_creation)],
+)
 async def create_target(request: TargetCreateRequest):
     """Register a URL for real health monitoring.
 
     Once monitoring_enabled and checked failure_threshold times in a row,
     a genuine Incident is created and run through the same orchestrator
     every simulator scenario uses — see backend.monitoring.url_monitor.
+
+    Bounded by two independent limits (abuse protection): a per-caller
+    creation rate (rate_limit_target_creation) and a hard ceiling on the
+    total number of targets that can ever exist at once — the latter is
+    what actually bounds how much outbound request volume the background
+    monitor loop generates per tick, since its check interval is a global
+    setting rather than something a caller controls.
     """
     storage = get_storage()
+    settings = get_settings()
+    existing = await target_store.list_targets(storage)
+    if len(existing) >= settings.max_monitored_targets:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Monitored-target limit reached ({settings.max_monitored_targets}). "
+                "Delete an existing target before adding another."
+            ),
+        )
+
     target = await target_store.create_target(storage, request.name, request.url)
     return target.model_dump(mode="json")
 
