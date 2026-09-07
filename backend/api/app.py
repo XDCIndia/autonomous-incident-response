@@ -12,12 +12,13 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Optional, Any
 
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import Depends, FastAPI, Request, Response, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,7 @@ from backend.platform.config import get_settings
 from backend.platform.events import get_event_bus
 from backend.platform.knowledge_base import search_similar
 from backend.platform.rate_limiter import SlidingWindowRateLimiter
+from backend.platform.sessions import SessionStore
 from backend.platform.storage import get_storage
 from backend.simulator.docker_controller import DockerController
 from backend.simulator.toxiproxy_client import ToxiproxyClient
@@ -70,6 +72,19 @@ def _get_target_creation_limiter() -> SlidingWindowRateLimiter:
             window_seconds=settings.target_creation_rate_window_seconds,
         )
     return _target_creation_limiter
+
+
+# Dashboard login sessions (Phase 5) — same lazy-singleton pattern as the
+# rate limiter above, for the same reason (tests override session_ttl_minutes
+# via env + the usual config_module._settings = None reset).
+_session_store: Optional[SessionStore] = None
+
+
+def _get_session_store() -> SessionStore:
+    global _session_store
+    if _session_store is None:
+        _session_store = SessionStore(ttl_minutes=get_settings().session_ttl_minutes)
+    return _session_store
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +366,42 @@ def require_api_key(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Missing or invalid API key")
 
 
+def _has_valid_api_key(request: Request) -> bool:
+    expected = get_settings().api_key.strip()
+    return bool(expected) and request.headers.get("X-API-Key", "") == expected
+
+
+def _has_valid_session(request: Request) -> bool:
+    settings = get_settings()
+    if not settings.auth_password.strip():
+        return False
+    token = request.cookies.get(settings.session_cookie_name)
+    return _get_session_store().is_valid(token)
+
+
+def require_auth(request: Request) -> None:
+    """The real authorization boundary for dashboard login (Phase 5).
+
+    A valid ``X-API-Key`` header OR a valid session cookie (established via
+    POST /auth/login) satisfies this — they're independent mechanisms for
+    two different kinds of caller (a programmatic/API client vs. a human in
+    a browser), and either one is sufficient. When NEITHER API_KEY nor
+    AUTH_PASSWORD is configured (both empty — the default), this is a
+    complete no-op: every existing endpoint and test that predates login
+    behaves exactly as it did before this feature existed.
+
+    Applied to every endpoint that isn't already open by design (``/health``
+    stays unauthenticated regardless — it reveals nothing sensitive and is
+    the conventional target for uptime probes/load balancers).
+    """
+    settings = get_settings()
+    if not settings.api_key.strip() and not settings.auth_password.strip():
+        return
+    if _has_valid_api_key(request) or _has_valid_session(request):
+        return
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
 # ---------------------------------------------------------------------------
 # Abuse protection for POST /targets (rate limiting)
 # ---------------------------------------------------------------------------
@@ -421,6 +472,19 @@ class MonitoringToggleRequest(BaseModel):
     enabled: bool
 
 
+class LoginRequest(BaseModel):
+    """Request to POST /auth/login."""
+    password: str
+
+
+class SessionResponse(BaseModel):
+    """Response for the auth endpoints — the frontend's only signal for
+    whether login is even required for this deployment (``auth_required``)
+    and whether the current caller currently has one (``authenticated``)."""
+    authenticated: bool
+    auth_required: bool
+
+
 # ---------------------------------------------------------------------------
 # REST Endpoints
 # ---------------------------------------------------------------------------
@@ -431,7 +495,67 @@ async def health():
     return {"status": "ok", "service": "autonomous-incident-response"}
 
 
-@app.get("/services/health")
+# ---------------------------------------------------------------------------
+# Dashboard login (Phase 5) — a single shared password, not per-user accounts.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/auth/login", response_model=SessionResponse)
+async def login(request: LoginRequest, response: Response):
+    """Establish a dashboard session for the shared password.
+
+    Disabled entirely (404) when AUTH_PASSWORD isn't configured — there is
+    nothing to log into, and this must not become a way to probe whether an
+    empty password is "valid" (it never is; the comparison would be
+    hmac.compare_digest(supplied, "") which is always False, but returning a
+    dedicated 404 for the unconfigured case is clearer than a misleading 401).
+    """
+    settings = get_settings()
+    expected = settings.auth_password.strip()
+    if not expected:
+        raise HTTPException(status_code=404, detail="Login is not enabled for this deployment")
+
+    if not hmac.compare_digest(request.password, expected):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+
+    token = _get_session_store().create()
+    response.set_cookie(
+        key=settings.session_cookie_name,
+        value=token,
+        max_age=settings.session_ttl_minutes * 60,
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_env.strip().lower() != "development",
+        path="/",
+    )
+    return SessionResponse(authenticated=True, auth_required=True)
+
+
+@app.post("/auth/logout", response_model=SessionResponse)
+async def logout(request: Request, response: Response):
+    """Invalidate the current session, if any, both server-side and in the
+    browser. Always succeeds — logging out an already-logged-out caller is
+    not an error."""
+    settings = get_settings()
+    token = request.cookies.get(settings.session_cookie_name)
+    _get_session_store().invalidate(token)
+    response.delete_cookie(key=settings.session_cookie_name, path="/")
+    return SessionResponse(authenticated=False, auth_required=bool(settings.auth_password.strip()))
+
+
+@app.get("/auth/session", response_model=SessionResponse)
+async def get_session(request: Request):
+    """Whether login is required for this deployment, and whether the
+    caller currently has a valid session — the frontend's only source of
+    truth for both questions (never inferred client-side)."""
+    settings = get_settings()
+    auth_required = bool(settings.auth_password.strip())
+    if not auth_required:
+        return SessionResponse(authenticated=True, auth_required=False)
+    return SessionResponse(authenticated=_has_valid_session(request), auth_required=True)
+
+
+@app.get("/services/health", dependencies=[Depends(require_auth)])
 async def services_health(service: str = "payment-service"):
     """Check the health of a specific IRAS-managed service."""
     if docker_ctl is None:
@@ -448,7 +572,7 @@ async def services_health(service: str = "payment-service"):
 
 @app.post(
     "/targets",
-    dependencies=[Depends(require_api_key), Depends(rate_limit_target_creation)],
+    dependencies=[Depends(require_auth), Depends(rate_limit_target_creation)],
 )
 async def create_target(request: TargetCreateRequest):
     """Register a URL for real health monitoring.
@@ -495,7 +619,7 @@ async def create_target(request: TargetCreateRequest):
     return target.model_dump(mode="json")
 
 
-@app.get("/targets")
+@app.get("/targets", dependencies=[Depends(require_auth)])
 async def list_targets():
     """List all registered monitored targets."""
     storage = get_storage()
@@ -503,7 +627,7 @@ async def list_targets():
     return [t.model_dump(mode="json") for t in targets]
 
 
-@app.get("/targets/{target_id}")
+@app.get("/targets/{target_id}", dependencies=[Depends(require_auth)])
 async def get_target(target_id: str):
     """Get a single monitored target's current health state."""
     storage = get_storage()
@@ -513,7 +637,7 @@ async def get_target(target_id: str):
     return target.model_dump(mode="json")
 
 
-@app.delete("/targets/{target_id}", dependencies=[Depends(require_api_key)])
+@app.delete("/targets/{target_id}", dependencies=[Depends(require_auth)])
 async def delete_target(target_id: str):
     """Stop monitoring and remove a registered target."""
     storage = get_storage()
@@ -523,7 +647,7 @@ async def delete_target(target_id: str):
     return {"status": "deleted", "id": target_id}
 
 
-@app.post("/targets/{target_id}/monitoring", dependencies=[Depends(require_api_key)])
+@app.post("/targets/{target_id}/monitoring", dependencies=[Depends(require_auth)])
 async def toggle_target_monitoring(target_id: str, request: MonitoringToggleRequest):
     """Enable or disable monitoring for a registered target without deleting it."""
     storage = get_storage()
@@ -533,7 +657,7 @@ async def toggle_target_monitoring(target_id: str, request: MonitoringToggleRequ
     return target.model_dump(mode="json")
 
 
-@app.post("/faults/inject", dependencies=[Depends(require_api_key)])
+@app.post("/faults/inject", dependencies=[Depends(require_auth)])
 async def inject_fault(request: FaultInjectionRequest):
     """Inject a fault using real Docker operations."""
     if docker_ctl is None:
@@ -621,7 +745,7 @@ async def inject_fault(request: FaultInjectionRequest):
         raise HTTPException(status_code=500, detail=f"Fault injection failed: {e}")
 
 
-@app.post("/remediation/execute", dependencies=[Depends(require_api_key)])
+@app.post("/remediation/execute", dependencies=[Depends(require_auth)])
 async def execute_remediation(request: RemediationRequest):
     """Execute a remediation action using real Docker operations."""
     if docker_ctl is None:
@@ -663,7 +787,7 @@ async def execute_remediation(request: RemediationRequest):
     }
 
 
-@app.post("/incidents/trigger", response_model=TriggerResponse, dependencies=[Depends(require_api_key)])
+@app.post("/incidents/trigger", response_model=TriggerResponse, dependencies=[Depends(require_auth)])
 async def trigger_incident(request: TriggerRequest):
     """Trigger a new incident with the specified scenario.
 
@@ -782,7 +906,7 @@ async def trigger_incident(request: TriggerRequest):
     )
 
 
-@app.get("/incidents")
+@app.get("/incidents", dependencies=[Depends(require_auth)])
 async def list_incidents(limit: int = Query(50, ge=1, le=100)):
     """List recent incidents."""
     storage = get_storage()
@@ -805,7 +929,7 @@ async def list_incidents(limit: int = Query(50, ge=1, le=100)):
     ]
 
 
-@app.get("/incidents/{incident_id}")
+@app.get("/incidents/{incident_id}", dependencies=[Depends(require_auth)])
 async def get_incident(incident_id: str):
     """Get incident details."""
     storage = get_storage()
@@ -815,7 +939,7 @@ async def get_incident(incident_id: str):
     return incident.model_dump(mode="json")
 
 
-@app.post("/incidents/{incident_id}/approve", response_model=ApprovalResponse, dependencies=[Depends(require_api_key)])
+@app.post("/incidents/{incident_id}/approve", response_model=ApprovalResponse, dependencies=[Depends(require_auth)])
 async def approve_incident(incident_id: str):
     """Approve remediation for a SEMI_AUTONOMOUS incident."""
     storage = get_storage()
@@ -840,7 +964,7 @@ async def approve_incident(incident_id: str):
     )
 
 
-@app.post("/incidents/{incident_id}/reject", response_model=ApprovalResponse, dependencies=[Depends(require_api_key)])
+@app.post("/incidents/{incident_id}/reject", response_model=ApprovalResponse, dependencies=[Depends(require_auth)])
 async def reject_incident(incident_id: str):
     """Reject remediation for a SEMI_AUTONOMOUS incident."""
     storage = get_storage()
@@ -865,7 +989,7 @@ async def reject_incident(incident_id: str):
     )
 
 
-@app.get("/knowledge-base/search")
+@app.get("/knowledge-base/search", dependencies=[Depends(require_auth)])
 async def search_knowledge_base(query: str = Query(..., min_length=1), top_k: int = Query(3, ge=1, le=10)):
     """Search historical incidents similar to `query` (TF-IDF cosine similarity)."""
     storage = get_storage()
@@ -873,7 +997,7 @@ async def search_knowledge_base(query: str = Query(..., min_length=1), top_k: in
     return {"query": query, "results": results}
 
 
-@app.get("/incidents/{incident_id}/timeline")
+@app.get("/incidents/{incident_id}/timeline", dependencies=[Depends(require_auth)])
 async def get_timeline(incident_id: str):
     """Get the timeline for an incident."""
     storage = get_storage()
@@ -890,7 +1014,7 @@ async def get_timeline(incident_id: str):
 # WebSocket
 # ---------------------------------------------------------------------------
 
-@app.get("/incidents/{incident_id}/approval")
+@app.get("/incidents/{incident_id}/approval", dependencies=[Depends(require_auth)])
 async def get_approval_status(incident_id: str):
     """Check if an incident has a pending approval."""
     orchestrator = get_orchestrator()
@@ -901,6 +1025,25 @@ async def get_approval_status(incident_id: str):
     }
 
 
+def _websocket_authorized(websocket: WebSocket) -> bool:
+    """Same require_auth gate, adapted for a WebSocket handshake — checked
+    BEFORE accept() so an unauthorized caller never receives even one live
+    timeline event over the socket. WebSocket exposes .cookies/.headers with
+    the same shape Request does, so the same X-API-Key/session-cookie checks
+    apply unchanged."""
+    settings = get_settings()
+    if not settings.api_key.strip() and not settings.auth_password.strip():
+        return True
+    api_key = settings.api_key.strip()
+    if api_key and websocket.headers.get("X-API-Key", "") == api_key:
+        return True
+    if settings.auth_password.strip():
+        token = websocket.cookies.get(settings.session_cookie_name)
+        if _get_session_store().is_valid(token):
+            return True
+    return False
+
+
 @app.websocket("/ws/incidents/{incident_id}")
 async def websocket_incident(websocket: WebSocket, incident_id: str):
     """WebSocket endpoint — streams timeline events as they happen.
@@ -908,6 +1051,9 @@ async def websocket_incident(websocket: WebSocket, incident_id: str):
     Connect to receive real-time updates during incident processing.
     """
     await websocket.accept()
+    if not _websocket_authorized(websocket):
+        await websocket.close(code=4401)
+        return
 
     event_bus = get_event_bus()
     queue = event_bus.subscribe(incident_id)

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { LogoutButton } from "@/components/LogoutButton";
 import { CineNetworkBackground } from "@/components/CineNetworkBackground";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
@@ -495,6 +496,7 @@ export default function Dashboard() {
           </div>
 
           <div className="ml-auto flex items-center gap-3">
+            <LogoutButton />
             <ThemeToggle />
           </div>
         </div>
