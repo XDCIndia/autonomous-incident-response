@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # cross-origin for the dashboard (frontend on :3000, API on :8000) but
     # must NOT be wildcard: endpoints drive real infra, so arbitrary websites
     # must not be able to call them from a browser (issue #31).
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
 
     # Real URL monitoring (issue #36): how often the background loop checks
     # every monitoring_enabled MonitoredTarget, and how many CONSECUTIVE

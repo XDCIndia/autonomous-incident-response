@@ -485,4 +485,7 @@ def test_cors_allowlist_defaults_to_dashboard_origins():
     assert "http://localhost:3000" in _allowed_origins
     # Settings default drives the middleware allowlist.
     defaults = Settings(_env_file=None)
-    assert defaults.cors_origins == "http://localhost:3000,http://127.0.0.1:3000"
+    assert defaults.cors_origins == (
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "http://localhost:3001,http://127.0.0.1:3001"
+    )
