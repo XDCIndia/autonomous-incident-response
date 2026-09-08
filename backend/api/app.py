@@ -581,7 +581,6 @@ async def create_target(request: TargetCreateRequest):
     a genuine Incident is created and run through the same orchestrator
     every simulator scenario uses — see backend.monitoring.url_monitor.
 
-<<<<<<< HEAD
     The URL is validated up front (scheme + DNS resolution + IP-range
     check) so a target that would only ever reach an internal/loopback/
     cloud-metadata address is rejected immediately with a clear error,
@@ -589,14 +588,13 @@ async def create_target(request: TargetCreateRequest):
     convenience only — the authoritative check runs again on every real
     connection (see backend.monitoring.ssrf_guard), since DNS can change
     after creation.
-=======
+
     Bounded by two independent limits (abuse protection): a per-caller
     creation rate (rate_limit_target_creation) and a hard ceiling on the
     total number of targets that can ever exist at once — the latter is
     what actually bounds how much outbound request volume the background
     monitor loop generates per tick, since its check interval is a global
     setting rather than something a caller controls.
->>>>>>> 41ec532 (security: rate limiting / abuse protection for POST /targets (Phase 1c))
     """
     try:
         await validate_target_url(request.url)
