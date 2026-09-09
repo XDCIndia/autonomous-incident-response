@@ -75,23 +75,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard login (Phase 5) — a single shared password, not per-user accounts.
+// Dashboard auth — multi-user accounts.
 // ---------------------------------------------------------------------------
+// Identity comes from the backend (GET /auth/session returns the
+// authenticated user's name/email); there is deliberately no client-side
+// identity store. The session itself is the backend's httpOnly cookie,
+// sent automatically on every `credentials: "include"` fetch.
+
+export interface SessionUser {
+  name: string;
+  email: string;
+}
 
 export interface AuthSession {
   authenticated: boolean;
   auth_required: boolean;
+  user: SessionUser | null;
 }
 
 export function getAuthSession(): Promise<AuthSession> {
   return request<AuthSession>("/auth/session");
 }
 
-export async function login(password: string): Promise<AuthSession> {
+export async function signup(name: string, email: string, password: string): Promise<AuthSession> {
+  const session = await request<AuthSession>("/auth/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, email, password }),
+  });
+  setUiSessionMarker(true);
+  return session;
+}
+
+export async function login(email: string, password: string): Promise<AuthSession> {
   const session = await request<AuthSession>("/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ email, password }),
   });
   setUiSessionMarker(true);
   return session;

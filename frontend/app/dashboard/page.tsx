@@ -4,9 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
-import { ThemeToggle } from "@/components/ThemeToggle";
-import { LogoutButton } from "@/components/LogoutButton";
-import { CineNetworkBackground } from "@/components/CineNetworkBackground";
+import { ConsoleShell } from "@/components/console/ConsoleShell";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
   ApiError,
@@ -470,39 +468,18 @@ export default function Dashboard() {
             : "Partial data";
 
   return (
-    <div className="min-h-screen">
-      <CineNetworkBackground />
-      {/* ── header ── */}
-      <header className="glass-nav sticky top-0 z-40">
-        <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-3">
-          <Link href="/" className="flex min-w-0 items-center gap-3">
-            <div className="relative grid h-8 w-8 shrink-0 place-items-center">
-              <div className="absolute inset-0 rounded-full border border-[rgba(54,215,232,0.2)]" />
-              <div className="h-2 w-2 rounded-full bg-[var(--color-accent-red)] opacity-80" />
-            </div>
-            <div className="leading-tight">
-              <div className="text-[14px] font-semibold tracking-[0.1em] text-[var(--color-text-primary)]">
-                SYSTEM BACHAO
-              </div>
-              <div className="label-micro text-[var(--color-text-faint)]">Operations Dashboard</div>
-            </div>
-          </Link>
-
-          <div className="hidden items-center gap-2 md:flex">
-            <StatusDot state={overallDot} size="md" pulse={overallDot !== "neutral"} />
-            <span className="font-mono text-[11px] tracking-[0.1em] text-[var(--color-text-secondary)]">
-              {overallLabel}
-            </span>
-          </div>
-
-          <div className="ml-auto flex items-center gap-3">
-            <LogoutButton />
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
-
-      <main className="mx-auto max-w-[1280px] px-4 py-8 space-y-8">
+    <ConsoleShell
+      title="Overview"
+      headerExtra={
+        <span className="hidden items-center gap-2 md:flex">
+          <StatusDot state={overallDot} size="md" pulse={overallDot !== "neutral"} />
+          <span className="font-mono text-[11px] tracking-[0.1em] text-[var(--color-text-secondary)]">
+            {overallLabel}
+          </span>
+        </span>
+      }
+    >
+      <div className="space-y-8">
         {/* ── service health ── */}
         <Panel
           title="Service Health"
@@ -813,7 +790,7 @@ export default function Dashboard() {
             )
           )}
         </Panel>
-      </main>
-    </div>
+      </div>
+    </ConsoleShell>
   );
 }

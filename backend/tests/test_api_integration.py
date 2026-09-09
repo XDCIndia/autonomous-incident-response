@@ -33,6 +33,13 @@ async def reset_storage(monkeypatch):
     # Force REAL_ENV=off so these tests keep booting instantly instead of
     # blocking on that retry window every run.
     monkeypatch.setenv("REAL_ENV", "off")
+    # Blank the demo-account seed from the local `.env`: this file's
+    # TestClient tests genuinely run lifespan(), which would otherwise seed
+    # DEMO_USER_* into the fresh :memory: storage and turn the auth gate on
+    # mid-test (401s on endpoints these tests drive anonymously by design).
+    monkeypatch.setenv("DEMO_USER_NAME", "")
+    monkeypatch.setenv("DEMO_USER_EMAIL", "")
+    monkeypatch.setenv("DEMO_USER_PASSWORD", "")
     config_module._settings = None
 
     storage = Storage(db_path=":memory:")

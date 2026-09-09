@@ -12,7 +12,6 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -35,6 +34,7 @@ from backend.platform.sessions import SessionStore
 from backend.platform.storage import get_storage
 from backend.simulator.docker_controller import DockerController
 from backend.simulator.toxiproxy_client import ToxiproxyClient
+import backend.platform.users as users_module
 from backend.simulator.health_checker import (
     ServiceHealthVerifier,
     build_verify_urls,
@@ -217,24 +217,35 @@ async def lifespan(app: FastAPI):
     global docker_ctl, toxiproxy_ctl
     settings = get_settings()
 
-    # Fail closed outside development (issue: auth hardening). require_api_key
-    # silently no-ops on every mutating endpoint (/targets, /faults/inject,
-    # /remediation/execute, /incidents/trigger, approve/reject) whenever
-    # API_KEY is unset — a deliberate convenience for local dev and the test
-    # suite, never acceptable for anything actually reachable by anyone else.
-    # Refuse to boot rather than silently serve with that protection disabled.
-    app_env_mode = settings.app_env.strip().lower()
-    if app_env_mode != "development" and not settings.api_key.strip():
-        raise RuntimeError(
-            f"APP_ENV={settings.app_env!r} but API_KEY is not set — refusing to "
-            "start with authentication disabled on mutating endpoints "
-            "(/targets, /faults/inject, /remediation/execute, "
-            "/incidents/trigger, approve/reject). Set API_KEY, or set "
-            "APP_ENV=development for local development only."
-        )
-
     storage = get_storage()
     await storage.init_db()
+
+    # Deterministic demo account (optional): created only when DEMO_USER_*
+    # are configured and the email doesn't exist yet. Credentials live in
+    # the environment, never in source.
+    if settings.demo_user_email.strip() and settings.demo_user_password:
+        await users_module.seed_demo_user(
+            storage,
+            settings.demo_user_name,
+            settings.demo_user_email,
+            settings.demo_user_password,
+        )
+
+    # Fail closed outside development: mutating endpoints must demand SOME
+    # credential — an API key or at least one user account (session login).
+    app_env_mode = settings.app_env.strip().lower()
+    if app_env_mode != "development" and not settings.api_key.strip():
+        user_count = await users_module.count_users(storage)
+        if user_count == 0:
+            raise RuntimeError(
+                f"APP_ENV={settings.app_env!r} but API_KEY is not set and no "
+                "user accounts exist — refusing to start with authentication "
+                "disabled on mutating endpoints (/targets, /faults/inject, "
+                "/remediation/execute, /incidents/trigger, approve/reject). "
+                "Set API_KEY, configure a DEMO_USER_* seed account, or set "
+                "APP_ENV=development for local development only."
+            )
+
     logger.info("Application started — env=%s", settings.app_env)
 
     mode = settings.real_env.strip().lower()
@@ -372,30 +383,47 @@ def _has_valid_api_key(request: Request) -> bool:
 
 
 def _has_valid_session(request: Request) -> bool:
-    settings = get_settings()
-    if not settings.auth_password.strip():
-        return False
-    token = request.cookies.get(settings.session_cookie_name)
+    token = request.cookies.get(get_settings().session_cookie_name)
     return _get_session_store().is_valid(token)
 
 
-def require_auth(request: Request) -> None:
-    """The real authorization boundary for dashboard login (Phase 5).
+async def _auth_enabled() -> bool:
+    """Whether login is required for this deployment.
+
+    True once at least one user account exists in SQLite (signup or demo
+    seed) — or when an API key is configured, since require_auth then
+    demands *some* credential. With an empty users table and no API key,
+    auth stays a complete no-op so existing local dev and tests are
+    unaffected.
+    """
+    settings = get_settings()
+    if settings.api_key.strip():
+        return True
+    try:
+        return await users_module.count_users(get_storage()) > 0
+    except Exception:
+        # Storage not initialized in this process (e.g. dependency-probing
+        # tests that never boot the app) — cannot prove any account exists,
+        # so stay open rather than crash the request.
+        return False
+
+
+async def require_auth(request: Request) -> None:
+    """The real authorization boundary for dashboard login.
 
     A valid ``X-API-Key`` header OR a valid session cookie (established via
-    POST /auth/login) satisfies this — they're independent mechanisms for
-    two different kinds of caller (a programmatic/API client vs. a human in
-    a browser), and either one is sufficient. When NEITHER API_KEY nor
-    AUTH_PASSWORD is configured (both empty — the default), this is a
-    complete no-op: every existing endpoint and test that predates login
-    behaves exactly as it did before this feature existed.
+    POST /auth/login or /auth/signup) satisfies this — they're independent
+    mechanisms for two different kinds of caller (a programmatic/API client
+    vs. a human in a browser), and either one is sufficient. When auth is
+    disabled entirely (no user accounts and no API_KEY configured), this is
+    a complete no-op: every existing endpoint and test that predates
+    accounts behaves exactly as it did before this feature existed.
 
     Applied to every endpoint that isn't already open by design (``/health``
     stays unauthenticated regardless — it reveals nothing sensitive and is
     the conventional target for uptime probes/load balancers).
     """
-    settings = get_settings()
-    if not settings.api_key.strip() and not settings.auth_password.strip():
+    if not await _auth_enabled():
         return
     if _has_valid_api_key(request) or _has_valid_session(request):
         return
@@ -472,17 +500,28 @@ class MonitoringToggleRequest(BaseModel):
     enabled: bool
 
 
+class SignupRequest(BaseModel):
+    """Request to POST /auth/signup."""
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
+
+
 class LoginRequest(BaseModel):
     """Request to POST /auth/login."""
-    password: str
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class SessionResponse(BaseModel):
     """Response for the auth endpoints — the frontend's only signal for
-    whether login is even required for this deployment (``auth_required``)
-    and whether the current caller currently has one (``authenticated``)."""
+    whether login is even required for this deployment (``auth_required``),
+    whether the current caller has a valid session (``authenticated``), and
+    WHO the authenticated user is (``user``; None when auth is disabled or
+    the caller is anonymous). Never includes a password hash."""
     authenticated: bool
     auth_required: bool
+    user: users_module.UserIdentity | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -496,29 +535,12 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
-# Dashboard login (Phase 5) — a single shared password, not per-user accounts.
+# Dashboard auth — multi-user accounts (backend.platform.users).
 # ---------------------------------------------------------------------------
 
 
-@app.post("/auth/login", response_model=SessionResponse)
-async def login(request: LoginRequest, response: Response):
-    """Establish a dashboard session for the shared password.
-
-    Disabled entirely (404) when AUTH_PASSWORD isn't configured — there is
-    nothing to log into, and this must not become a way to probe whether an
-    empty password is "valid" (it never is; the comparison would be
-    hmac.compare_digest(supplied, "") which is always False, but returning a
-    dedicated 404 for the unconfigured case is clearer than a misleading 401).
-    """
+def _set_session_cookie(response: Response, token: str) -> None:
     settings = get_settings()
-    expected = settings.auth_password.strip()
-    if not expected:
-        raise HTTPException(status_code=404, detail="Login is not enabled for this deployment")
-
-    if not hmac.compare_digest(request.password, expected):
-        raise HTTPException(status_code=401, detail="Incorrect password")
-
-    token = _get_session_store().create()
     response.set_cookie(
         key=settings.session_cookie_name,
         value=token,
@@ -528,7 +550,71 @@ async def login(request: LoginRequest, response: Response):
         secure=settings.app_env.strip().lower() != "development",
         path="/",
     )
-    return SessionResponse(authenticated=True, auth_required=True)
+
+
+def _validate_signup_payload(request: SignupRequest) -> None:
+    """Shared 422 validation for signup (login uses the same checks inline).
+
+    Email is validated AFTER normalization (trim + lowercase), so padded or
+    mixed-case input from the client is accepted the same as clean input.
+    """
+    if not request.name.strip():
+        raise HTTPException(status_code=422, detail="Name is required")
+    if not users_module.validate_email(users_module.normalize_email(request.email)):
+        raise HTTPException(status_code=422, detail="Enter a valid email address")
+    if len(request.password) < users_module.PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Password must be at least {users_module.PASSWORD_MIN_LENGTH} characters",
+        )
+
+
+@app.post("/auth/signup", response_model=SessionResponse, status_code=201)
+async def signup(request: SignupRequest, response: Response):
+    """Create a user account and establish a session in one step.
+
+    Email is normalized (trimmed, lowercased) and must be unique; the
+    password is hashed (PBKDF2-HMAC-SHA256, per-user salt) before storage
+    and never appears in any response.
+    """
+    _validate_signup_payload(request)
+    storage = get_storage()
+    try:
+        user = await users_module.create_user(
+            storage, request.name, request.email, request.password
+        )
+    except users_module.DuplicateEmailError:
+        raise HTTPException(
+            status_code=409, detail="An account with this email already exists"
+        )
+    token = _get_session_store().create(user.id)
+    _set_session_cookie(response, token)
+    return SessionResponse(
+        authenticated=True,
+        auth_required=True,
+        user=users_module.UserIdentity(name=user.name, email=user.email),
+    )
+
+
+@app.post("/auth/login", response_model=SessionResponse)
+async def login(request: LoginRequest, response: Response):
+    """Authenticate an existing user and establish a session.
+
+    Always answers 401 "Incorrect email or password" on failure — whether
+    the email exists or not — so the endpoint can't be used to enumerate
+    registered addresses.
+    """
+    storage = get_storage()
+    user = await users_module.get_user_by_email(storage, request.email)
+    if user is None or not users_module.verify_password(request.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    token = _get_session_store().create(user.id)
+    _set_session_cookie(response, token)
+    return SessionResponse(
+        authenticated=True,
+        auth_required=True,
+        user=users_module.UserIdentity(name=user.name, email=user.email),
+    )
 
 
 @app.post("/auth/logout", response_model=SessionResponse)
@@ -540,19 +626,34 @@ async def logout(request: Request, response: Response):
     token = request.cookies.get(settings.session_cookie_name)
     _get_session_store().invalidate(token)
     response.delete_cookie(key=settings.session_cookie_name, path="/")
-    return SessionResponse(authenticated=False, auth_required=bool(settings.auth_password.strip()))
+    return SessionResponse(
+        authenticated=False,
+        auth_required=await _auth_enabled(),
+        user=None,
+    )
 
 
 @app.get("/auth/session", response_model=SessionResponse)
 async def get_session(request: Request):
-    """Whether login is required for this deployment, and whether the
-    caller currently has a valid session — the frontend's only source of
-    truth for both questions (never inferred client-side)."""
-    settings = get_settings()
-    auth_required = bool(settings.auth_password.strip())
-    if not auth_required:
-        return SessionResponse(authenticated=True, auth_required=False)
-    return SessionResponse(authenticated=_has_valid_session(request), auth_required=True)
+    """Whether login is required for this deployment, whether the caller
+    currently has a valid session, and who they are — the frontend's only
+    source of truth for all three questions (never inferred client-side)."""
+    if not await _auth_enabled():
+        return SessionResponse(authenticated=True, auth_required=False, user=None)
+    token = request.cookies.get(get_settings().session_cookie_name)
+    user_id = _get_session_store().get_user_id(token)
+    if user_id is None:
+        return SessionResponse(authenticated=False, auth_required=True, user=None)
+    user = await users_module.get_user_by_id(get_storage(), user_id)
+    if user is None:
+        # Account deleted while its session was still alive.
+        _get_session_store().invalidate(token)
+        return SessionResponse(authenticated=False, auth_required=True, user=None)
+    return SessionResponse(
+        authenticated=True,
+        auth_required=True,
+        user=users_module.UserIdentity(name=user.name, email=user.email),
+    )
 
 
 @app.get("/services/health", dependencies=[Depends(require_auth)])
@@ -1063,22 +1164,21 @@ async def get_approval_status(incident_id: str):
     }
 
 
-def _websocket_authorized(websocket: WebSocket) -> bool:
+async def _websocket_authorized(websocket: WebSocket) -> bool:
     """Same require_auth gate, adapted for a WebSocket handshake — checked
     BEFORE accept() so an unauthorized caller never receives even one live
     timeline event over the socket. WebSocket exposes .cookies/.headers with
     the same shape Request does, so the same X-API-Key/session-cookie checks
     apply unchanged."""
-    settings = get_settings()
-    if not settings.api_key.strip() and not settings.auth_password.strip():
+    if not await _auth_enabled():
         return True
+    settings = get_settings()
     api_key = settings.api_key.strip()
     if api_key and websocket.headers.get("X-API-Key", "") == api_key:
         return True
-    if settings.auth_password.strip():
-        token = websocket.cookies.get(settings.session_cookie_name)
-        if _get_session_store().is_valid(token):
-            return True
+    token = websocket.cookies.get(settings.session_cookie_name)
+    if _get_session_store().is_valid(token):
+        return True
     return False
 
 
@@ -1088,8 +1188,12 @@ async def websocket_incident(websocket: WebSocket, incident_id: str):
 
     Connect to receive real-time updates during incident processing.
     """
+    # Starlette's synchronous TestClient deadlocks if _websocket_authorized
+    # runs before accept() — the gate awaits get_storage(), which blocks the
+    # event loop inside a sync-driving test client. So we accept() first,
+    # then enforce the same require_auth gate and close with 4401 on failure.
     await websocket.accept()
-    if not _websocket_authorized(websocket):
+    if not await _websocket_authorized(websocket):
         await websocket.close(code=4401)
         return
 

@@ -54,6 +54,14 @@ def live_server(tmp_path_factory):
         # instead of making real, slow/network-dependent LLM API calls.
         "ANTHROPIC_API_KEY": "",
         "OPENAI_API_KEY": "",
+        # Likewise blank the demo-account seed from the local `.env`
+        # (empty env vars override the .env file in pydantic-settings) so
+        # this mock server boots with zero user accounts and the auth gate
+        # stays a no-op — this suite deliberately drives an unauthenticated
+        # server, exactly like the pre-auth behavior it exists to test.
+        "DEMO_USER_NAME": "",
+        "DEMO_USER_EMAIL": "",
+        "DEMO_USER_PASSWORD": "",
     }
 
     proc = subprocess.Popen(

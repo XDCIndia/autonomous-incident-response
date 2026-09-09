@@ -143,6 +143,20 @@ class Storage:
             )
             """
         )
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)"
+        )
         await self._conn.commit()
         logger.info("Storage: initialized SQLite at %s", self._db_path)
 

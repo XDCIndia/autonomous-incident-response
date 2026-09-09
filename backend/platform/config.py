@@ -86,18 +86,26 @@ class Settings(BaseSettings):
     target_creation_rate_window_seconds: float = 60.0
     max_monitored_targets: int = 200
 
-    # Dashboard login (Phase 5). A single shared password gating the UI —
-    # not a per-user account system (that's a separate, later phase). Empty
-    # (default) disables login entirely: every page and endpoint behaves
-    # exactly as it did before this feature existed, so existing local dev
-    # and every existing test is unaffected. Set AUTH_PASSWORD to require a
-    # session (established via POST /auth/login) on every endpoint that
-    # doesn't already accept a valid X-API-Key — session and API-key auth
-    # are independent and either one satisfies the same gate, so existing
-    # API_KEY-based programmatic/API clients keep working without logging in.
-    auth_password: str = ""
+    # Dashboard login (multi-user). User accounts live in SQLite
+    # (backend/platform/users.py); a successful POST /auth/login or
+    # /auth/signup establishes an httpOnly session cookie, and a valid
+    # session OR a valid X-API-Key satisfies the same require_auth gate.
+    # With zero user accounts in the database and no API_KEY configured,
+    # auth is a complete no-op: every endpoint behaves exactly as it did
+    # before accounts existed, so existing local dev and tests are
+    # unaffected. The first signup (or a seeded demo user below) turns
+    # login on for every endpoint that isn't already open by design.
     session_ttl_minutes: int = 480
     session_cookie_name: str = "sb_session"
+
+    # Optional deterministic demo account, created by the app lifespan on
+    # startup if (and only if) it doesn't exist yet. Credentials come from
+    # the environment only — never hardcode them in source. Leave all three
+    # empty to skip seeding entirely (fresh deployments start open until
+    # the first signup).
+    demo_user_name: str = ""
+    demo_user_email: str = ""
+    demo_user_password: str = ""
 
     # extra="ignore": .env is shared with the frontend (NEXT_PUBLIC_* vars)
     # and isn't backend config — reject only unknown *backend* keys, not those.

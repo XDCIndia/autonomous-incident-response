@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { Button, Chip, MicroLabel, Panel, StatusDot } from "@/components/ui";
 import { IconCheck } from "@/components/icons";
-import { CineNetworkBackground } from "@/components/CineNetworkBackground";
+import { ConsoleShell } from "@/components/console/ConsoleShell";
 import { useScrollReveal } from "@/hooks/useScrollReveal";
 import {
   ApiError,
@@ -340,66 +340,68 @@ export default function IncidentPage() {
 
   if (fetchError && !incident) {
     return (
-      <div className="mx-auto max-w-[720px] px-4 py-16 text-center">
-        <p className="text-[15px] font-medium text-[var(--color-accent-red)]">Couldn&apos;t load this incident.</p>
-        <p className="mt-2 text-[13px] text-[var(--color-text-muted)]">{fetchError}</p>
-        <div className="mt-6 flex items-center justify-center gap-3">
-          <Button variant="secondary" onClick={refreshIncident}>
-            Retry
-          </Button>
-          <Link href="/dashboard">
-            <Button variant="ghost">Back to Dashboard</Button>
-          </Link>
+      <ConsoleShell title="Incident">
+        <div className="mx-auto max-w-[720px] py-16 text-center">
+          <p className="text-[15px] font-medium text-[var(--color-accent-red)]">Couldn&apos;t load this incident.</p>
+          <p className="mt-2 text-[13px] text-[var(--color-text-muted)]">{fetchError}</p>
+          <div className="mt-6 flex items-center justify-center gap-3">
+            <Button variant="secondary" onClick={refreshIncident}>
+              Retry
+            </Button>
+            <Link href="/incidents">
+              <Button variant="ghost">Back to Incidents</Button>
+            </Link>
+          </div>
         </div>
-      </div>
+      </ConsoleShell>
     );
   }
 
   if (!incident) {
     return (
-      <div className="grid min-h-screen place-items-center">
-        <div className="text-center space-y-4">
-          <div className="mx-auto h-8 w-8 rounded-full border-2 border-[var(--color-border-default)] border-t-[var(--color-accent-cyan)] animate-spin" />
-          <p className="font-mono text-[11px] tracking-[0.14em] text-[var(--color-text-muted)]">
-            loading incident
-          </p>
+      <ConsoleShell title="Incident">
+        <div className="grid place-items-center py-32">
+          <div className="text-center space-y-4">
+            <div className="mx-auto h-8 w-8 rounded-full border-2 border-[var(--color-border-default)] border-t-[var(--color-accent-cyan)] animate-spin" />
+            <p className="font-mono text-[11px] tracking-[0.14em] text-[var(--color-text-muted)]">
+              loading incident
+            </p>
+          </div>
         </div>
-      </div>
+      </ConsoleShell>
     );
   }
 
   return (
-    <div className="min-h-screen">
-      <CineNetworkBackground />
-      {/* ── header ── */}
-      <header className="glass-nav sticky top-0 z-40">
-        <div className="mx-auto flex max-w-[1280px] items-center gap-4 px-4 py-2.5">
+    <ConsoleShell
+      title={serviceDisplayName(incident.service_name)}
+      headerExtra={
+        <span className="flex items-center gap-1.5">
+          <StatusDot state={connected ? "healthy" : "neutral"} size="sm" pulse={connected} />
+          <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--color-text-muted)]">
+            {connected ? "LIVE" : "RECONNECTING…"}
+          </span>
+        </span>
+      }
+    >
+      <div className="space-y-6">
+        {/* ── incident meta ── */}
+        <div className="flex flex-wrap items-center gap-2">
           <Link
-            href="/dashboard"
+            href="/incidents"
             className="label-micro shrink-0 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-primary)]"
           >
-            ← DASHBOARD
+            ← INCIDENTS
           </Link>
-          <div className="mx-1 hidden h-5 w-px bg-[var(--color-border-subtle)] sm:block" />
-          <span className="text-[14px] font-semibold tracking-[0.06em] text-[var(--color-text-primary)]">
-            {serviceDisplayName(incident.service_name)}
-          </span>
+          <div className="mx-1 hidden h-4 w-px bg-[var(--color-border-subtle)] sm:block" />
           <Chip tone={incidentSourceTone(incident.source)}>{incidentSourceLabel(incident.source)}</Chip>
           <Chip tone={stateTone(incident.state)}>{incident.state}</Chip>
           {incident.severity && <Chip tone={severityTone(incident.severity)}>{incident.severity}</Chip>}
-          <span className="ml-auto flex items-center gap-1.5">
-            <StatusDot state={connected ? "healthy" : "neutral"} size="sm" pulse={connected} />
-            <span className="font-mono text-[10px] tracking-[0.1em] text-[var(--color-text-muted)]">
-              {connected ? "LIVE" : "RECONNECTING…"}
-            </span>
-          </span>
-          <span className="hidden font-mono text-[11px] tracking-[0.06em] text-[var(--color-text-faint)] sm:inline">
+          <span className="ml-auto hidden font-mono text-[11px] tracking-[0.06em] text-[var(--color-text-faint)] sm:inline">
             {incident.id}
           </span>
         </div>
-      </header>
 
-      <main className="mx-auto max-w-[1280px] px-4 py-6 space-y-6">
         {/* ── approval gate — real endpoints only ── */}
         {pendingApproval && incident.remediation_request && (
           <Panel className="border-[rgba(245,184,75,0.3)]" title="Approval Required">
@@ -642,7 +644,7 @@ export default function IncidentPage() {
             </dl>
           </Panel>
         )}
-      </main>
-    </div>
+      </div>
+    </ConsoleShell>
   );
 }

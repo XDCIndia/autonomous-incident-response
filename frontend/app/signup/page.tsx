@@ -7,24 +7,27 @@ import { useEffect, useState } from "react";
 import { Button, Panel } from "@/components/ui";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { CineNetworkBackground } from "@/components/CineNetworkBackground";
-import { ApiError, getAuthSession, login } from "@/lib/api";
+import { ApiError, getAuthSession, signup } from "@/lib/api";
 
-export default function LoginPage() {
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export default function SignupPage() {
   return (
     <Suspense fallback={<div className="grid min-h-screen place-items-center"><div className="h-8 w-8 rounded-full border-2 border-[var(--color-border-default)] border-t-[var(--color-accent-cyan)] animate-spin" /></div>}>
-      <LoginPageInner />
+      <SignupPageInner />
     </Suspense>
   );
 }
 
-function LoginPageInner() {
+function SignupPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const next = searchParams.get("next") || "/dashboard";
 
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
+  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
@@ -35,15 +38,13 @@ function LoginPageInner() {
       try {
         const session = await getAuthSession();
         if (cancelled) return;
-        // Nothing to log into (no accounts yet) or already logged in —
-        // either way, there's no reason to show the form.
-        if (!session.auth_required || session.authenticated) {
+        // Already logged in — go straight to the console.
+        if (session.authenticated) {
           router.replace(next);
           return;
         }
       } catch {
-        // Backend unreachable — fall through to showing the form; a failed
-        // login attempt will surface a clearer error than a silent redirect.
+        // Backend unreachable — show the form; submit will surface an error.
       }
       if (!cancelled) {
         setCheckingSession(false);
@@ -56,30 +57,40 @@ function LoginPageInner() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!name.trim()) {
+      setError("Enter your full name.");
+      return;
+    }
     const trimmedEmail = email.trim();
     if (!trimmedEmail) {
       setError("Enter your email address.");
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+    if (!EMAIL_RE.test(trimmedEmail)) {
       setError("Enter a valid email address.");
       return;
     }
-    if (!password) {
-      setError("Enter your password.");
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match.");
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      await login(trimmedEmail, password);
+      await signup(name.trim(), trimmedEmail, password);
       router.replace(next);
     } catch (e) {
-      setError(
-        e instanceof ApiError && e.status === 401
-          ? "Incorrect email or password."
-          : "Unable to log in — try again."
-      );
+      if (e instanceof ApiError && e.status === 409) {
+        setError("An account with this email already exists.");
+      } else if (e instanceof ApiError && e.status === 422) {
+        setError(e.message || "Please check the fields and try again.");
+      } else {
+        setError("Unable to create your account — try again.");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -120,11 +131,26 @@ function LoginPageInner() {
       </header>
 
       <main className="mx-auto flex max-w-[420px] items-center px-4 py-24">
-        <Panel title="Login" className="w-full">
+        <Panel title="Create Account" className="w-full">
           <p className="-mt-1 mb-4 text-[12px] text-[var(--color-text-muted)]">
-            Authenticate to access the incident response console.
+            Create an operator account for the incident response console.
           </p>
           <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+            <div>
+              <label htmlFor="name" className="label-micro mb-1 block text-[var(--color-text-muted)]">
+                Full name
+              </label>
+              <input
+                id="name"
+                type="text"
+                autoComplete="name"
+                placeholder="Your full name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+                className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent-cyan)]"
+              />
+            </div>
             <div>
               <label htmlFor="email" className="label-micro mb-1 block text-[var(--color-text-muted)]">
                 Email address
@@ -136,7 +162,6 @@ function LoginPageInner() {
                 placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                autoFocus
                 className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent-cyan)]"
               />
             </div>
@@ -144,26 +169,29 @@ function LoginPageInner() {
               <label htmlFor="password" className="label-micro mb-1 block text-[var(--color-text-muted)]">
                 Password
               </label>
-              <div className="relative">
-                <input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  autoComplete="current-password"
-                  placeholder="Enter your password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 pr-14 text-[13px] text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent-cyan)]"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                  aria-pressed={showPassword}
-                  className="label-micro absolute inset-y-0 right-0 flex items-center px-3 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-primary)]"
-                >
-                  {showPassword ? "Hide" : "Show"}
-                </button>
-              </div>
+              <input
+                id="password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Enter your password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent-cyan)]"
+              />
+            </div>
+            <div>
+              <label htmlFor="confirm" className="label-micro mb-1 block text-[var(--color-text-muted)]">
+                Confirm password
+              </label>
+              <input
+                id="confirm"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Confirm your password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[13px] text-[var(--color-text-primary)] outline-none transition-colors placeholder:text-[var(--color-text-faint)] focus:border-[var(--color-accent-cyan)]"
+              />
             </div>
             {error && (
               <p role="alert" className="rounded border border-[rgba(255,77,103,0.3)] bg-[rgba(255,77,103,0.07)] px-3 py-2 text-[12px] text-[var(--color-accent-red)]">
@@ -171,13 +199,13 @@ function LoginPageInner() {
               </p>
             )}
             <Button variant="primary" size="md" disabled={submitting}>
-              {submitting ? "Logging in…" : "Login"}
+              {submitting ? "Creating account…" : "Create Account"}
             </Button>
           </form>
 
           <p className="mt-4 text-center text-[12px] text-[var(--color-text-muted)]">
-            Don&apos;t have an account?{" "}
-            <Link href="/signup" className="text-[var(--color-accent-cyan)] hover:underline">
+            Already have an account?{" "}
+            <Link href="/login" className="text-[var(--color-accent-cyan)] hover:underline">
               Sign in
             </Link>
           </p>

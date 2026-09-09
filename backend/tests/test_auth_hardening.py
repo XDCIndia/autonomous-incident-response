@@ -26,8 +26,13 @@ async def reset_state(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "")
     # Keep every boot in this file fast and hermetic, same reasoning as
     # test_api_integration.py's identical fixture: REAL_ENV != "off" makes
-    # lifespan() retry Toxiproxy readiness for up to 40s.
+    # lifespan() retry Toxiproxy readiness for up to 40s. DEMO_USER_* are
+    # cleared so a seeded account can't leak in from the repo's own .env
+    # and wrongly satisfy the fail-closed boot check.
     monkeypatch.setenv("REAL_ENV", "off")
+    monkeypatch.setenv("DEMO_USER_NAME", "")
+    monkeypatch.setenv("DEMO_USER_EMAIL", "")
+    monkeypatch.setenv("DEMO_USER_PASSWORD", "")
     config_module._settings = None
 
     storage = Storage(db_path=":memory:")
